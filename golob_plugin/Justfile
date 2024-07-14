@@ -1,0 +1,117 @@
+
+PluginName       := "Golobulus"
+BundleIdentifier := "com.adobe.AfterEffects.{{Golobulus}}"
+BinaryName       := "golob_plugin" 
+CrateName        := "golob_plugin" 
+PyMajor          := "3.12"
+PyMinor          := ".3"
+PyVer            := PyMajor + PyMinor
+NumpyVersion     := "2.0"
+BundlePyPath     := "Contents/Resources/Python"
+
+macos_triple := arch() + "-apple-darwin"
+win_triple   := arch() + "-pc-windows-msvc"
+
+macos_standalone_url := "https://github.com/indygreg/python-build-standalone/releases/download/20240415/cpython-"+PyVer+"+20240415-"+macos_triple+"-pgo+lto-full.tar.zst"
+win_standalone_url   := "https://github.com/indygreg/python-build-standalone/releases/download/20240415/cpython-"+PyVer+"+20240415-"+win_triple+"-pgo-full.tar.zst"
+TargetDir            := env_var_or_default("CARGO_TARGET_DIR", "../target")
+export AESDK_ROOT    := if env("AESDK_ROOT", "") == "" { justfile_directory() / "../../sdk/AfterEffectsSDK" } else { env_var("AESDK_ROOT") }
+export PRSDK_ROOT    := if env("PRSDK_ROOT", "") == "" { justfile_directory() / "../../sdk/Premiere Pro 22.0 C++ SDK" } else { env_var("PRSDK_ROOT") }
+
+set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
+
+[windows]
+build:
+    cargo build
+    Start-Process PowerShell -Verb runAs -ArgumentList "-command Copy-Item -Force '{{TargetDir}}\debug\{{BinaryName}}.dll' 'C:\Program Files\Adobe\Common\Plug-ins\7.0\MediaCore\{{PluginName}}.aex'"
+
+[windows]
+release:
+    #! powershell.exe 
+    if (-not (Test-Path "{{TargetDir}}\release\python")) {
+        Write-Host "{{TargetDir}}\release\python directory doesn't exist. Downloading and extracting..."
+        Write-Host "curling {{win_standalone_url}}"
+        mkdir -P "{{TargetDir}}\release\python"
+        curl -o "{{TargetDir}}\release\download.tar.zst" "{{win_standalone_url}}"
+        tar --zstd -xf "{{TargetDir}}\release\download.tar.zst" -C "{{TargetDir}}\release"
+        Remove-Item "{{TargetDir}}\release\download.tar.zst"
+        Remove-Item -Recurse "{{TargetDir}}\release\python\build"
+        Remove-Item "{{TargetDir}}\release\python\PYTHON.json"
+        Remove-Item -Recurse "{{TargetDir}}\release\python\install\include"
+        Write-Host "pipping numpy"
+        & "{{TargetDir}}\release\python\install\python.exe" -m pip install numpy=={{NumpyVersion}}
+    }
+    $Env:PYO3_CONFIG_FILE = "{{justfile_directory()}}\pyo3_configs\{{win_triple}}.cfg"
+    cargo build --release
+
+    Copy-Item -Force '{{TargetDir}}\release\{{CrateName}}.dll' '{{TargetDir}}\release\python\install\{{PluginName}}.aex'
+    # You can uncomment this for CI purposes
+    # Rename-Item -Path '{{TargetDir}}\release\python' -NewName 'Golobulus'
+
+configure_for_release Arch:
+    #! /usr/bin/env sh
+    if [ {{macos_triple}} != {{Arch}} ]; then
+      echo "This build script can not cross compile for release, it calls pip3 natively. {{Arch}}, {{arch()}}"
+      exit 1
+    fi
+    # fetch indygreg standalone python install
+    #! /usr/bin/env sh
+    if [ ! -d "{{TargetDir}}/{{Arch}}/python" ]; then
+      echo "{{TargetDir}}/{{Arch}}/python directory doesn't exist. Downloading and extracting..."
+      echo "curling {{macos_standalone_url}}"
+      mkdir -p {{TargetDir}}/{{Arch}}
+      curl -L -o "{{TargetDir}}/{{macos_triple}}/download.zst" "{{macos_standalone_url}}"
+      tar --zstd -xf "{{TargetDir}}/{{macos_triple}}/download.zst" -C "{{TargetDir}}/{{macos_triple}}"
+      rm "{{TargetDir}}/{{macos_triple}}/download.zst"
+      rm "{{TargetDir}}/{{Arch}}/python/install/lib/libpython{{PyMajor}}.a"
+      ./{{TargetDir}}/{{Arch}}/python/install/bin/pip3 install numpy=={{NumpyVersion}}
+    fi
+
+tweak_dylib_path Arch BuildType:
+    # modify the dylib search path
+    install_name_tool -change /install/lib/libpython{{PyMajor}}.dylib @loader_path/../Resources/Python/lib/libpython{{PyMajor}}.dylib {{TargetDir}}/{{BuildType}}/{{PluginName}}.plugin/Contents/MacOs/{{PluginName}} 
+    # move stanalone build into the release bundle
+    mkdir -p {{TargetDir}}/{{BuildType}}/{{PluginName}}.plugin/Contents/Resources/Python
+    cp -r {{TargetDir}}/{{Arch}}/python/install/lib {{TargetDir}}/{{BuildType}}/{{PluginName}}.plugin/Contents/Resources/Python
+    cp -r {{TargetDir}}/{{Arch}}/python/licenses {{TargetDir}}/{{BuildType}}/{{PluginName}}.plugin/Contents/Resources/Python
+
+codesign BuildType CertType:
+    # sign with first valid cert 
+    codesign --options runtime --timestamp -strict --sign $( security find-identity -v -p codesigning | grep -m 1 '{{CertType}}' | awk -F ' ' '{print $2}' ) {{TargetDir}}/{{BuildType}}/{{PluginName}}.plugin
+
+[macos]
+build arch=macos_triple:
+    #linking and building with the system python3.x.
+    just -f {{justfile()}} create_bundle {{arch}} debug ''
+    just -f {{justfile()}} codesign debug "Apple Development"
+
+[macos]
+release arch=macos_triple:
+    just -f {{justfile()}} configure_for_release {{arch}} 
+    PYO3_CONFIG_FILE={{justfile_directory()}}/pyo3_configs/{{arch}}.cfg just -f {{justfile()}} create_bundle {{arch}} release  --release
+    just -f {{justfile()}} tweak_dylib_path {{arch}} release
+    just -f {{justfile()}} codesign release "Developer ID Application"
+
+[macos]
+create_bundle Arch BuildType BuildFlags:
+    echo "Creating {{Arch}} plugin bundle"
+    rm -Rf {{TargetDir}}/{{BuildType}}/{{PluginName}}.plugin
+    mkdir -p {{TargetDir}}/{{BuildType}}/{{PluginName}}.plugin/Contents/Resources
+    mkdir -p {{TargetDir}}/{{BuildType}}/{{PluginName}}.plugin/{{BundlePyPath}}
+    mkdir -p {{TargetDir}}/{{BuildType}}/{{PluginName}}.plugin/Contents/MacOS
+
+    rustup target add {{Arch}} 
+
+    cargo build {{BuildFlags}} --target {{Arch}} 
+
+    echo "eFKTFXTC" >> {{TargetDir}}/{{BuildType}}/{{PluginName}}.plugin/Contents/PkgInfo
+    /usr/libexec/PlistBuddy -c 'add CFBundlePackageType string eFKT' {{TargetDir}}/{{BuildType}}/{{PluginName}}.plugin/Contents/Info.plist
+    /usr/libexec/PlistBuddy -c 'add CFBundleSignature string FXTC' {{TargetDir}}/{{BuildType}}/{{PluginName}}.plugin/Contents/Info.plist
+    /usr/libexec/PlistBuddy -c 'add CFBundleIdentifier string {{BundleIdentifier}}' {{TargetDir}}/{{BuildType}}/{{PluginName}}.plugin/Contents/Info.plist
+ 
+
+    cp {{TargetDir}}/{{BuildType}}/{{CrateName}}.rsrc {{TargetDir}}/{{BuildType}}/{{PluginName}}.plugin/Contents/Resources/{{PluginName}}.rsrc
+
+    cp {{TargetDir}}/{{Arch}}/{{BuildType}}/lib{{CrateName}}.dylib {{TargetDir}}/{{BuildType}}/{{PluginName}}.plugin/Contents/MacOS/{{BinaryName}}.dylib
+    mv {{TargetDir}}/{{BuildType}}/{{PluginName}}.plugin/Contents/MacOS/{{BinaryName}}.dylib {{TargetDir}}/{{BuildType}}/{{PluginName}}.plugin/Contents/MacOS/{{PluginName}}
+  

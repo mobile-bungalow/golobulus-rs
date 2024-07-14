@@ -1,0 +1,4 @@
+[workspace]
+resolver = "2"
+members = ["golob_plugin", "golob_lib", "golob_playground"]
+
