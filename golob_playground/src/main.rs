@@ -11,10 +11,26 @@ use util::*;
 
 #[derive(Debug)]
 pub enum AppMessage {
-    LoadImage { var: String, path: PathBuf },
-    UnloadImage { var: String },
-    LoadScript { path: PathBuf },
-    ResizeOutput { width: u32, height: u32 },
+    LoadImage {
+        var: String,
+        path: PathBuf,
+    },
+    UnloadImage {
+        var: String,
+    },
+    ChangeFilterMode {
+        mode: egui::TextureFilter,
+    },
+    LoadScript {
+        path: PathBuf,
+    },
+    ResizeOutput {
+        width: u32,
+        height: u32,
+    },
+    ScreenShot {
+        params: Option<(u32, u32, egui::TextureFilter)>,
+    },
     ReloadScript,
     Render,
 }
@@ -31,12 +47,12 @@ pub struct AppState {
     pub last_render: std::time::Instant,
     pub last_render_dim: [usize; 2],
     pub current_file: Arc<RwLock<Option<String>>>,
-    pub staging_size: [usize; 2],
     pub input_panel_hidden: bool,
     pub show_resize_dialog: bool,
     pub draw_continuously: bool,
     pub eager_updates: bool,
     pub show_logs: bool,
+    pub filter_type: egui::TextureFilter,
 }
 
 pub struct PlayGround {
@@ -47,7 +63,7 @@ pub struct PlayGround {
 impl PlayGround {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
         let (width, height) = (255, 255);
-        let data = vec![255; width * height * 4];
+        let data = vec![0; width * height * 4];
 
         let output = ImageDesc {
             data,
@@ -77,13 +93,13 @@ impl PlayGround {
                 last_render: std::time::Instant::now(),
                 last_render_dim: [255, 255],
                 loaded_images: Arc::default(),
-                staging_size: [255, 255],
                 current_file: Arc::default(),
                 input_panel_hidden: false,
                 show_resize_dialog: false,
                 draw_continuously: false,
                 show_logs: false,
                 eager_updates: true,
+                filter_type: egui::TextureFilter::Linear,
             },
         }
     }
@@ -98,8 +114,12 @@ impl eframe::App for PlayGround {
         egui::CentralPanel::default().show(ctx, |ui| {
             let stat_copy = (*self.runner.status.read()).clone();
             match stat_copy {
-                background_thread::RunnerStatus::InitFailed
-                | background_thread::RunnerStatus::RunFailed => {
+                background_thread::RunnerStatus::InitFailed => {
+                    self.state.show_logs = true;
+                    *self.state.current_file.write().unwrap() = None;
+                    *self.runner.status.write() = background_thread::RunnerStatus::Busy;
+                }
+                background_thread::RunnerStatus::RunFailed => {
                     self.state.show_logs = true;
                     *self.runner.status.write() = background_thread::RunnerStatus::Busy;
                 }
@@ -144,13 +164,62 @@ impl eframe::App for PlayGround {
                     }
                 });
 
+                ui.menu_button("Tools", |ui| {
+                    if ui.button("Take Screenshot").clicked() {
+                        self.runner
+                            .sender
+                            .send(AppMessage::ScreenShot { params: None })
+                            .unwrap();
+                    }
+
+                    if ui.button("Take Screenshot at Window Resolution").clicked() {
+                        let lb =
+                            util::compute_letterbox(self.state.last_render_dim, ctx.screen_rect());
+                        self.runner
+                            .sender
+                            .send(AppMessage::ScreenShot {
+                                params: Some((
+                                    lb.width() as u32,
+                                    lb.height() as u32,
+                                    self.state.filter_type,
+                                )),
+                            })
+                            .unwrap();
+                    }
+                });
+
                 ui.menu_button("Options", |ui| {
                     if ui.button("Resize Output Image").clicked() {
                         self.state.show_resize_dialog = true;
                     }
-                    ui.checkbox(&mut self.state.draw_continuously, "animated");
+
+                    let before = self.state.filter_type.clone();
+                    egui::ComboBox::from_label("Filter Type")
+                        .selected_text(format!("{:?}", self.state.filter_type))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.state.filter_type,
+                                egui::TextureFilter::Nearest,
+                                "Nearest",
+                            );
+                            ui.selectable_value(
+                                &mut self.state.filter_type,
+                                egui::TextureFilter::Linear,
+                                "Linear",
+                            );
+                        });
+                    if before != self.state.filter_type {
+                        self.runner
+                            .sender
+                            .send(AppMessage::ChangeFilterMode {
+                                mode: self.state.filter_type,
+                            })
+                            .unwrap();
+                    }
+
+                    ui.checkbox(&mut self.state.draw_continuously, "animate script");
                     ui.checkbox(&mut self.state.eager_updates, "eagerly update inputs");
-                    ui.checkbox(&mut self.state.show_logs, "logs");
+                    ui.checkbox(&mut self.state.show_logs, "show logs");
                 });
             });
         });

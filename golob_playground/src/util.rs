@@ -69,6 +69,11 @@ pub fn resize_dialog(
 }
 
 pub fn compute_letterbox(texture_size: [usize; 2], screen_rect: egui::Rect) -> egui::Rect {
+    // pad letterbox
+    let mut new_rect = screen_rect;
+    new_rect.min += egui::vec2(0.0, 20.0);
+    let screen_rect = new_rect;
+
     let texture_aspect_ratio = texture_size[0] as f32 / texture_size[1] as f32;
     let screen_aspect_ratio = screen_rect.width() / screen_rect.height();
 

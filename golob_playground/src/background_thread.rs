@@ -1,7 +1,9 @@
 use egui::mutex::RwLock;
 use golob_lib::PythonRunner;
+use image::imageops::FilterType::Triangle;
 use notify::*;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{mpsc::Sender, Arc};
 
 #[derive(Debug, Clone)]
@@ -26,6 +28,7 @@ fn render(
     runner: &mut PythonRunner,
     image_inputs: &HashMap<String, crate::ImageDesc>,
     mut target: egui::TextureHandle,
+    filter_mode: egui::TextureFilter,
     status: Arc<RwLock<RunnerStatus>>,
 ) {
     let start = std::time::Instant::now();
@@ -80,11 +83,21 @@ fn render(
             runner,
             image_inputs,
             target,
+            filter_mode,
             status,
         );
     } else {
         let data = egui::ColorImage::from_rgba_unmultiplied([*width, *height], buf);
-        target.set(data, Default::default());
+
+        target.set(
+            data,
+            egui::TextureOptions {
+                magnification: filter_mode,
+                minification: filter_mode,
+                wrap_mode: egui::TextureWrapMode::ClampToEdge,
+            },
+        );
+
         *status.write() = RunnerStatus::Normal {
             height: *height,
             width: *width,
@@ -92,7 +105,7 @@ fn render(
     }
 }
 
-pub fn spawn_render_thread(target: egui::TextureHandle) -> RunnerState {
+pub fn spawn_render_thread(mut target: egui::TextureHandle) -> RunnerState {
     let status_th = Arc::new(RwLock::new(RunnerStatus::Normal {
         height: 255,
         width: 255,
@@ -122,10 +135,26 @@ pub fn spawn_render_thread(target: egui::TextureHandle) -> RunnerState {
         let mut staging_buffer = vec![0u8; width * height * 4];
         let mut image_inputs = std::collections::HashMap::new();
         let mut current_path: Option<std::path::PathBuf> = None;
+        let mut filter_mode = egui::TextureFilter::Linear;
         let start = std::time::Instant::now();
 
         while let Ok(msg) = receiver.recv() {
             match msg {
+                crate::AppMessage::ChangeFilterMode { mode } => {
+                    filter_mode = mode;
+
+                    let data =
+                        egui::ColorImage::from_rgba_unmultiplied([width, height], &staging_buffer);
+
+                    target.set(
+                        data,
+                        egui::TextureOptions {
+                            magnification: filter_mode,
+                            minification: filter_mode,
+                            wrap_mode: egui::TextureWrapMode::ClampToEdge,
+                        },
+                    );
+                }
                 crate::AppMessage::UnloadImage { var } => {
                     image_inputs.remove(&var);
 
@@ -137,6 +166,7 @@ pub fn spawn_render_thread(target: egui::TextureHandle) -> RunnerState {
                         &mut runner_th.write(),
                         &image_inputs,
                         target.clone(),
+                        filter_mode,
                         status_th.clone(),
                     );
                 }
@@ -170,6 +200,7 @@ pub fn spawn_render_thread(target: egui::TextureHandle) -> RunnerState {
                         &mut runner_th.write(),
                         &image_inputs,
                         target.clone(),
+                        filter_mode,
                         status_th.clone(),
                     );
                 }
@@ -221,6 +252,7 @@ pub fn spawn_render_thread(target: egui::TextureHandle) -> RunnerState {
                         &mut runner_th.write(),
                         &image_inputs,
                         target.clone(),
+                        filter_mode,
                         status_th.clone(),
                     );
                 }
@@ -228,7 +260,7 @@ pub fn spawn_render_thread(target: egui::TextureHandle) -> RunnerState {
                     width: new_w,
                     height: new_h,
                 } => {
-                    staging_buffer = vec![255; (new_w * new_h * 4) as usize];
+                    staging_buffer = vec![0; (new_w * new_h * 4) as usize];
                     width = new_w as usize;
                     height = new_h as usize;
                     *status_th.write() = RunnerStatus::Normal { width, height };
@@ -252,21 +284,55 @@ pub fn spawn_render_thread(target: egui::TextureHandle) -> RunnerState {
                                 &mut runner_th.write(),
                                 &image_inputs,
                                 target.clone(),
+                                filter_mode,
                                 status_th.clone(),
                             );
                         }
                     }
                 }
-                crate::AppMessage::Render => render(
-                    start.elapsed().as_secs_f32(),
-                    &mut width,
-                    &mut height,
-                    &mut staging_buffer,
-                    &mut runner_th.write(),
-                    &image_inputs,
-                    target.clone(),
-                    status_th.clone(),
-                ),
+                crate::AppMessage::Render => {
+                    render(
+                        start.elapsed().as_secs_f32(),
+                        &mut width,
+                        &mut height,
+                        &mut staging_buffer,
+                        &mut runner_th.write(),
+                        &image_inputs,
+                        target.clone(),
+                        filter_mode,
+                        status_th.clone(),
+                    );
+                }
+                crate::AppMessage::ScreenShot { params } => {
+                    let Some(file) = tinyfiledialogs::save_file_dialog("Save Screenshot", "/")
+                    else {
+                        continue;
+                    };
+
+                    let mut file = PathBuf::from(file);
+
+                    let mut image = image::RgbaImage::from_raw(
+                        width as u32,
+                        height as u32,
+                        staging_buffer.clone(),
+                    )
+                    .unwrap();
+
+                    if let Some((width, height, filter)) = params {
+                        let filter = match filter {
+                            egui::TextureFilter::Nearest => image::imageops::FilterType::Nearest,
+                            egui::TextureFilter::Linear => Triangle,
+                        };
+
+                        image = image::imageops::resize(&image, width, height, filter).into();
+                    }
+
+                    if file.extension().is_none() {
+                        file.set_extension("png");
+                    }
+
+                    image.save(file).unwrap();
+                }
             }
         }
     });
