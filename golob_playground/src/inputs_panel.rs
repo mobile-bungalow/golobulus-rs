@@ -1,4 +1,6 @@
-use crate::launch_image_dialog;
+use std::sync::mpsc::Sender;
+
+use crate::{launch_image_dialog, AppMessage};
 
 fn point_selector(ui: &mut egui::Ui, name: &str, input: &mut golob_lib::variant::Cfg<[f32; 2]>) {
     ui.horizontal(|ui| {
@@ -46,6 +48,7 @@ pub fn input_widget(
     ctx: &egui::Context,
     ui: &mut egui::Ui,
     state: &mut crate::AppState,
+    message_queue: &Sender<AppMessage>,
     name: &str,
     val: &mut golob_lib::Variant,
 ) -> bool {
@@ -53,7 +56,7 @@ pub fn input_widget(
     match val {
         golob_lib::Variant::Image(d) => match d.current {
             golob_lib::variant::Image::Input => {
-                file_selector(ui, ctx, name, state);
+                file_selector(ui, ctx, name, state, message_queue);
             }
             golob_lib::variant::Image::Output => {}
         },
@@ -92,17 +95,32 @@ pub fn input_widget(
     before != *val
 }
 
-fn file_selector(ui: &mut egui::Ui, ctx: &egui::Context, name: &str, state: &mut crate::AppState) {
+fn file_selector(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    name: &str,
+    app_state: &mut crate::AppState,
+    message_queue: &Sender<AppMessage>,
+) {
     ui.horizontal(|ui| {
         ui.label(name);
-        if state.inputs.contains_key(name) {
+        if app_state.loaded_images.read().unwrap().contains_key(name) {
             ui.label("Loaded");
             if ui.button("X").clicked() {
-                state.needs_redraw = true;
-                state.inputs.remove(name);
+                message_queue
+                    .send(AppMessage::UnloadImage {
+                        var: name.to_owned(),
+                    })
+                    .unwrap();
+                app_state.loaded_images.write().unwrap().remove(name);
             }
         } else if ui.button("Load Image").clicked() {
-            launch_image_dialog(state.tx.clone(), ctx.clone(), name.to_owned());
+            launch_image_dialog(
+                message_queue.clone(),
+                ctx.clone(),
+                name.to_owned(),
+                app_state.loaded_images.clone(),
+            );
         }
     });
 }

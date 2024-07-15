@@ -1,51 +1,69 @@
 use crate::*;
 use std::sync::mpsc::Sender;
 
-pub fn launch_script_dialog(sender: Sender<AppMessage>, ctx: egui::Context) {
+pub fn launch_script_dialog(
+    sender: Sender<AppMessage>,
+    ctx: egui::Context,
+    current_script: Arc<RwLock<Option<String>>>,
+) {
     std::thread::spawn(move || {
         let file_path = tinyfiledialogs::open_file_dialog("Load a python script", "/", None);
 
         if let Some(file_path) = file_path {
-            let _ = sender.send(AppMessage::LoadScript {
-                path: std::path::PathBuf::from(file_path),
-            });
+            let path = std::path::PathBuf::from(file_path);
+
+            *current_script.write().unwrap() =
+                Some(path.file_name().unwrap().to_string_lossy().to_string());
+
+            let _ = sender.send(AppMessage::LoadScript { path });
+
             ctx.request_repaint();
         }
     });
 }
 
-pub fn launch_image_dialog(sender: Sender<AppMessage>, ctx: egui::Context, var: String) {
+pub fn launch_image_dialog(
+    sender: Sender<AppMessage>,
+    ctx: egui::Context,
+    var: String,
+    entries: Arc<RwLock<HashMap<String, PathBuf>>>,
+) {
     std::thread::spawn(move || {
         let file_path = tinyfiledialogs::open_file_dialog("Load an Image or Video", "/", None);
 
         if let Some(file_path) = file_path {
-            let _ = sender.send(AppMessage::LoadImage {
-                path: std::path::PathBuf::from(file_path),
-                var,
-            });
+            let path = std::path::PathBuf::from(file_path);
+            let path_clone = path.clone();
+            entries.write().unwrap().insert(var.clone(), path_clone);
+            let _ = sender.send(AppMessage::LoadImage { path, var });
             ctx.request_repaint();
         }
     });
 }
 
-pub fn resize_dialog(state: &mut AppState, status: &mut RunnerStatus, ctx: &egui::Context) {
+pub fn resize_dialog(
+    app_state: &mut AppState,
+    runner_state: &mut background_thread::RunnerState,
+    ctx: &egui::Context,
+) {
     egui::Window::new("Resize Output Image").show(ctx, |ui| {
-        ui.add(egui::Slider::new(&mut state.staging_size[0], 1..=4096).text("Width"));
-        ui.add(egui::Slider::new(&mut state.staging_size[1], 1..=4096).text("Height"));
+        ui.add(egui::Slider::new(&mut app_state.staging_size[0], 1..=4096).text("Width"));
+        ui.add(egui::Slider::new(&mut app_state.staging_size[1], 1..=4096).text("Height"));
 
         if ui.button("Resize").clicked() {
-            state.output.data = vec![255; state.staging_size[0] * state.staging_size[1] * 4];
-            state.output.width = state.staging_size[0] as u32;
-            state.output.height = state.staging_size[1] as u32;
-
-            state.show_resize_dialog = false;
-            state.needs_redraw = true;
-            *status = RunnerStatus::Normal;
+            runner_state
+                .sender
+                .send(AppMessage::ResizeOutput {
+                    width: app_state.staging_size[0] as u32,
+                    height: app_state.staging_size[1] as u32,
+                })
+                .unwrap();
+            app_state.show_resize_dialog = false;
             info!("resizing output image");
         }
 
         if ui.button("Cancel").clicked() {
-            state.show_resize_dialog = false;
+            app_state.show_resize_dialog = false;
         }
     });
 }
