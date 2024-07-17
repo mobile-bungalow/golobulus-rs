@@ -349,7 +349,9 @@ impl PythonRunner {
                     .is_some_and(|size| size.width > output.width || size.height > output.height)
             {
                 self.output_size = ctx.borrow(py).output_size_requested();
+
                 let s = self.output_size.clone().unwrap();
+
                 return Err(GolobulError::OutputSizeTooLarge {
                     req: (s.height, s.width),
                     avail: (output.height, output.width),
@@ -387,7 +389,22 @@ impl PythonRunner {
                 Ok(Ok(_)) => {
                     Python::with_gil(|py| self.finalize(&ctx, &py, &mut output, &out_catcher))
                 }
-                Ok(Err(e)) => Err(Python::with_gil(|py| traceback(e, &out_catcher, py))),
+                Ok(Err(e)) => Err(Python::with_gil(|py| {
+                    if ctx.borrow(py).output_size_requested().is_some_and(|size| {
+                        size.width > output.width || size.height > output.height
+                    }) {
+                        self.output_size = ctx.borrow(py).output_size_requested();
+
+                        let s = self.output_size.clone().unwrap();
+
+                        return GolobulError::OutputSizeTooLarge {
+                            req: (s.height, s.width),
+                            avail: (output.height, output.width),
+                        };
+                    } else {
+                        traceback(e, &out_catcher, py)
+                    }
+                })),
                 Err(_) => Err(GolobulError::Asio),
             },
         }

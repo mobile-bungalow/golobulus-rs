@@ -109,12 +109,17 @@ impl PyContext {
 
     pub fn configure_output_size(&mut self, height: u32, width: u32) -> Result<(), PyErr> {
         // The runner needs to be aware of this *regardless* of runner status
-        self.output_size_override = Some(OutputSize { width, height });
 
         if height == 0 || width == 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Cannot request an output image size with a zero dimension",
             ));
+        }
+
+        self.output_size_override = Some(OutputSize { width, height });
+
+        if self.is_in_setup {
+            return Ok(());
         }
 
         if height > self.target_height || width > self.target_width {

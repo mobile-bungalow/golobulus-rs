@@ -186,12 +186,6 @@ impl eframe::App for PlayGround {
                 });
 
                 ui.menu_button("Options", |ui| {
-                    ui.checkbox(&mut self.state.draw_continuously, "animate script");
-                    ui.checkbox(&mut self.state.eager_updates, "eagerly update inputs");
-                    ui.checkbox(&mut self.state.show_logs, "show logs");
-
-                    ui.separator();
-
                     let before = self.state.filter_type;
                     egui::ComboBox::from_label("Select Filter Type")
                         .selected_text(format!("{:?}", self.state.filter_type))
@@ -215,6 +209,12 @@ impl eframe::App for PlayGround {
                             })
                             .unwrap();
                     }
+
+                    ui.separator();
+
+                    ui.checkbox(&mut self.state.draw_continuously, "animate script");
+                    ui.checkbox(&mut self.state.eager_updates, "eagerly update inputs");
+                    ui.checkbox(&mut self.state.show_logs, "show logs");
                 });
             });
         });
@@ -229,7 +229,7 @@ impl eframe::App for PlayGround {
                     ui.vertical_centered_justified(|ui| {
                         match self.state.current_file.read().unwrap().as_ref() {
                             None => ui.label("No File Loaded"),
-                            Some(ref s) => ui.label(format!("Loaded File: {s}")),
+                            Some(ref s) => ui.label(format!("Watched File: {s}")),
                         };
                     });
 

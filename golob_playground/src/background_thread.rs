@@ -63,13 +63,18 @@ fn render(
     }
 
     log_run(&out);
+
     let dur = start.elapsed().as_secs_f32();
-    log::info!("render took: {dur} secs");
+    log::info!(
+        "render took: {dur} secs, {:?}",
+        runner.requested_output_resize()
+    );
 
     if runner
         .requested_output_resize()
         .is_some_and(|size| size.width != *width as u32 || size.height != *height as u32)
     {
+        log::debug!("Rerendering with exact buffer specified");
         let size = runner.requested_output_resize().unwrap();
         *buf = vec![0; (size.width * size.height * 4) as usize];
         *width = size.width as usize;
@@ -177,7 +182,7 @@ pub fn spawn_render_thread(mut target: egui::TextureHandle) -> RunnerState {
                     let image = image.to_rgba8();
                     let [im_width, im_height] = [image.width(), image.height()];
                     log::info!(
-                        "loading image {path:?} with dimensions width : {width} height: {height}"
+                        "loading image {path:?} with dimensions width : {im_width} height: {im_height}"
                     );
 
                     let image_buffer = image.into_raw();
@@ -241,19 +246,19 @@ pub fn spawn_render_thread(mut target: egui::TextureHandle) -> RunnerState {
                         *status_th.write() = RunnerStatus::InitFailed;
                     } else {
                         *status_th.write() = RunnerStatus::Normal { height, width };
-                    }
 
-                    render(
-                        start.elapsed().as_secs_f32(),
-                        &mut width,
-                        &mut height,
-                        &mut staging_buffer,
-                        &mut runner_th.write(),
-                        &image_inputs,
-                        target.clone(),
-                        filter_mode,
-                        status_th.clone(),
-                    );
+                        render(
+                            start.elapsed().as_secs_f32(),
+                            &mut width,
+                            &mut height,
+                            &mut staging_buffer,
+                            &mut runner_th.write(),
+                            &image_inputs,
+                            target.clone(),
+                            filter_mode,
+                            status_th.clone(),
+                        );
+                    }
                 }
                 crate::AppMessage::ResizeOutput {
                     width: new_w,
@@ -275,6 +280,7 @@ pub fn spawn_render_thread(mut target: egui::TextureHandle) -> RunnerState {
                             *status_th.write() = RunnerStatus::InitFailed;
                         } else {
                             *status_th.write() = RunnerStatus::Normal { width, height };
+
                             render(
                                 start.elapsed().as_secs_f32(),
                                 &mut width,
