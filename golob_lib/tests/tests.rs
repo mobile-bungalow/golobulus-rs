@@ -230,7 +230,7 @@ fn ident_png_color_depths() {
         let mut output = vec![0u8; input.len()];
 
         let i = InDesc {
-            fmt: ImageFormat::Argb16ae,
+            fmt: ImageFormat::Rgba16,
             data: input,
             width: 1024,
             height: 577,
@@ -238,7 +238,7 @@ fn ident_png_color_depths() {
         };
 
         let o = OutDesc {
-            fmt: ImageFormat::Argb16ae,
+            fmt: ImageFormat::Rgba16,
             data: &mut output,
             width: 1024,
             height: 577,
@@ -261,7 +261,7 @@ fn ident_png_color_depths() {
         let mut output = vec![0u8; input.len()];
 
         let i = InDesc {
-            fmt: ImageFormat::Argb32,
+            fmt: ImageFormat::Rgba32,
             data: input,
             width: 1024,
             height: 577,
@@ -269,7 +269,7 @@ fn ident_png_color_depths() {
         };
 
         let o = OutDesc {
-            fmt: ImageFormat::Argb32,
+            fmt: ImageFormat::Rgba32,
             data: &mut output,
             width: 1024,
             height: 577,
@@ -514,144 +514,6 @@ fn grayscale() {
 
     let snapshot = &png_pixels!("./resources/grayscale/out.png");
     assert!(approximately_equivalent(&output, snapshot));
-}
-
-const SCALED_BLIT: &str = r"
-import numpy as np
-
-def setup(ctx):
-    ctx.register_int('height')
-    ctx.register_int('width')
-    pass
-
-def run(ctx):
-    height = ctx.get_input('height')
-    width = ctx.get_input('width')
-    ctx.configure_output_size(height, width)
-    out = ctx.get_output()
-    assert out.shape[0] == height 
-    assert out.shape[1] == width
-
-    checkerboard_size = 10  # Size of each square in the checkerboard
-    x = np.arange(0, width, 1)
-    y = np.arange(0, height, 1)
-    xx, yy = np.meshgrid(x, y)
-    checkerboard = np.where(
-        ((xx // checkerboard_size) + (yy // checkerboard_size)) % 2 == 0,
-        np.array(255, dtype='uint8'),
-        np.array(0, dtype='uint8'),
-    )
-
-    out[..., 3] = 255 
-    out[..., 2] = checkerboard
-    out[..., 1] = checkerboard
-    out[..., 0] = checkerboard
-";
-
-// in after effects when we request an output size change
-// the first target buffer rendered with the requested size always has the wrong
-// dimension, so we blit to its center or blit with overflow from a correctly shaped buffer we allocate ourselves.
-// subsequent frames get the relevant region in memory with a stride, *then* they blit to its center or with overflow directly.
-// this test asserts that the first oversized frame is rendered identically to the padded one on
-// target buffers with dimensions that exceed, and fall short of the target buffer dimensions.
-#[test]
-fn blit_scaling() {
-    let original_width = 300;
-    let original_height = 400;
-
-    let test_cases = vec![
-        (original_height as i32, original_width as i32), // Ident
-        (100, 100),                                      // same size
-        (100, 50),                                       // centered, same height, half width
-        (100, 75),                                       // centered, same height, odd width
-        (50, 50),                                        // centered, half height, half width,
-        (50, 100),                                       // vertically centered, half height,
-    ];
-
-    for (new_height, new_width) in test_cases {
-        let run_script = |buffer, width, height, stride| {
-            let mut runner = PythonRunner::default();
-            runner.load_script(SCALED_BLIT, None).unwrap();
-
-            set_input(&mut runner, "width", new_width);
-            set_input(&mut runner, "height", new_height);
-
-            let o = OutDesc {
-                fmt: ImageFormat::Rgba8,
-                data: buffer,
-                width,
-                height,
-                stride,
-            };
-
-            let pass = runner.create_render_pass(o);
-
-            pass.submit().unwrap();
-        };
-
-        let mut first_output = vec![0u8; original_height * original_width * 4];
-
-        run_script(
-            &mut first_output,
-            original_width as u32,
-            original_height as u32,
-            None,
-        );
-
-        let mut second_output = vec![0u8; original_height * original_width * 4];
-
-        let range = if new_height < original_height as i32 {
-            let row_height = original_width * 4;
-            let skip_rows = (original_height - new_height as usize) / 2;
-
-            (row_height * skip_rows)..(second_output.len() - (row_height * skip_rows))
-        } else {
-            0..second_output.len()
-        };
-
-        run_script(
-            &mut second_output[range],
-            new_width as u32,
-            new_height as u32,
-            Some(original_width as u32 * 4),
-        );
-
-        //write_texture_to_png(
-        //    &first_output,
-        //    &format!("normal-{new_width}x{new_height}.png"),
-        //    original_height as u32,
-        //    original_width as u32,
-        //)
-        //.unwrap();
-
-        //write_texture_to_png(
-        //    &second_output,
-        //    &format!("strided-{new_width}x{new_height}.png"),
-        //    original_height as u32,
-        //    original_width as u32,
-        //)
-        //.unwrap();
-
-        for (i, (first, second)) in first_output
-            .chunks_exact(original_width * 4)
-            .zip(second_output.chunks_exact(original_width * 4))
-            .enumerate()
-        {
-            assert_eq!(
-                &first, &second,
-                "assertion failed at row {i} on test case ({new_height}, {new_width})",
-            );
-        }
-    }
-}
-
-fn set_input(runner: &mut PythonRunner, name: &str, value: i32) {
-    let input = runner.iter_inputs_mut().find(|(n, _)| *n == name).unwrap();
-    if let Variant::Int(ref mut cfg) = input.1 {
-        cfg.current = value;
-    } else {
-        panic!("Input '{}' is not an integer!", name);
-    }
 }
 
 #[test]

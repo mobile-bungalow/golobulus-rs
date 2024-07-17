@@ -7,7 +7,6 @@ edition = "2021"
 [dependencies]
 pyo3 = { version = "0.21.2" }
 numpy = "0.21"
-rayon = "1.10.0"
 indexmap = "2.2.6"
 bytemuck = "1.16.1"
 thiserror = "1.0.61"

@@ -32,8 +32,10 @@ impl ParamIdx {
             Self::StartRender => 14,
             Self::CancelRender => 15,
             Self::ContinuousRenderGroupEnd => 16,
-            Self::IsImageFilter => 17,
+            Self::ParametersStart => 17,
+            Self::IsImageFilter => 18,
             Self::Dynamic(x) => *x,
+            Self::ParametersEnd => Self::IsImageFilter.idx() + (MAX_INPUTS * PARAM_TYPE_COUNT) + 1,
         }
     }
 }
@@ -57,7 +59,13 @@ impl From<usize> for ParamIdx {
             14 => Self::StartRender,
             15 => Self::CancelRender,
             16 => Self::ContinuousRenderGroupEnd,
-            17 => Self::IsImageFilter,
+            17 => Self::ParametersStart,
+            18 => Self::IsImageFilter,
+            end if end as i32
+                == (Self::IsImageFilter.idx() + (MAX_INPUTS * PARAM_TYPE_COUNT) + 1) =>
+            {
+                Self::ParametersEnd
+            }
             n => Self::Dynamic(n as i32),
         }
     }
@@ -92,25 +100,10 @@ pub fn update_param_defaults_and_labels(
     state: &mut crate::PluginState,
     local: &mut crate::instance::Instance,
 ) -> Result<(), ae::Error> {
-    let Some(_) = local.src else {
-        // Just show the load button if we haven't loaded
-        // a shader.
-        for i in ParamIdx::UnloadButton.idx()..state.params.num_params() as i32 {
-            set_param_visibility(state.in_data, ParamIdx::Dynamic(i), false)?;
-        }
-        set_param_visibility(state.in_data, ParamIdx::LoadButton, true)?;
-
-        return Ok(());
-    };
-
-    let param_util_suite = ae::pf::suites::ParamUtils::new()?;
     for (i, (name, var)) in local.runner.iter_inputs().enumerate() {
         let index = as_param_index(i, var);
-        set_param_visibility(state.in_data, index, true)?;
         let mut def = state.params.get_mut(index)?;
-        def.set_name(name);
-        let param = def.as_param_mut()?;
-        match param {
+        match def.as_param_mut()? {
             ae::Param::CheckBox(mut cb) => {
                 if let Variant::Bool(b) = var {
                     cb.set_default(b.default);
@@ -173,130 +166,148 @@ pub fn update_param_defaults_and_labels(
             _ => {}
         }
 
+        def.set_name(name);
+        def.update_param_ui()?;
         def.set_value_changed();
-        param_util_suite.update_param_ui(state.in_data.effect(), index.idx(), &def)?;
     }
 
     Ok(())
 }
 
-pub fn update_param_ui(
+fn set_debug_vis(state: &mut crate::PluginState, visible: bool) -> Result<(), ae::Error> {
+    for idx in ParamIdx::DebugGroupBegin.idx()..=ParamIdx::DebugGroupEnd.idx() {
+        set_param_visibility(state.in_data, ParamIdx::from(idx as usize), visible)?;
+    }
+    Ok(())
+}
+
+fn set_script_vis(
+    state: &mut crate::PluginState,
+    script_loaded: bool,
+    venv_loaded: bool,
+) -> Result<(), ae::Error> {
+    set_param_visibility(state.in_data, ParamIdx::LoadButton, !script_loaded)?;
+    set_param_visibility(state.in_data, ParamIdx::ReloadButton, script_loaded)?;
+    set_param_visibility(state.in_data, ParamIdx::UnloadButton, script_loaded)?;
+    set_param_visibility(state.in_data, ParamIdx::SetVenv, !venv_loaded)?;
+    set_param_visibility(state.in_data, ParamIdx::UnsetVenv, venv_loaded)?;
+    Ok(())
+}
+
+fn set_sequential_control_vis(
+    state: &mut crate::PluginState,
+    is_sequential: bool,
+    // none if no render active
+    render_progress: Option<f32>,
+) -> Result<(), ae::Error> {
+    set_param_visibility(
+        state.in_data,
+        ParamIdx::ContinuousRenderGroupBegin,
+        is_sequential,
+    )?;
+    set_param_visibility(
+        state.in_data,
+        ParamIdx::StartRender,
+        is_sequential && render_progress.is_none(),
+    )?;
+    set_param_visibility(
+        state.in_data,
+        ParamIdx::CancelRender,
+        is_sequential && render_progress.is_some(),
+    )?;
+    set_param_visibility(
+        state.in_data,
+        ParamIdx::ContinuousRenderGroupEnd,
+        is_sequential,
+    )?;
+
+    let label = match render_progress {
+        Some(prog) => {
+            format!("Cancel: %{:.2}", prog)
+        }
+        None => String::from("Cancel"),
+    };
+
+    let mut prog = state.params.get_mut(ParamIdx::CancelRender)?;
+    prog.set_name(&label);
+
+    let param_util_suite = ae::pf::suites::ParamUtils::new()?;
+
+    param_util_suite.update_param_ui(
+        state.in_data.effect(),
+        ParamIdx::CancelRender.idx(),
+        &prog,
+    )?;
+
+    Ok(())
+}
+
+fn set_user_param_vis(
+    state: &mut crate::PluginState,
+    local: &mut crate::instance::Instance,
+    script_loaded: bool,
+) -> Result<(), ae::Error> {
+    for index in ParamIdx::IsImageFilter.idx()..ParamIdx::ParametersEnd.idx() {
+        set_param_visibility(state.in_data, ParamIdx::from(index as usize), false)?;
+    }
+
+    let params = local.runner.iter_inputs().enumerate();
+    let params_exist = params.size_hint().0 != 0;
+
+    set_param_visibility(
+        state.in_data,
+        ParamIdx::ParametersStart,
+        script_loaded && params_exist,
+    )?;
+
+    for (i, (_, var)) in local.runner.iter_inputs().enumerate() {
+        let index = as_param_index(i, var);
+        set_param_visibility(state.in_data, index, true)?;
+    }
+
+    let first_image_input = local
+        .runner
+        .iter_inputs()
+        .enumerate()
+        .find(|(_, (_, v))| matches!(v, Variant::Image(_)));
+
+    // only show image filter options IF we have at least one image input
+    set_param_visibility(
+        state.in_data,
+        ParamIdx::IsImageFilter,
+        first_image_input.is_some(),
+    )?;
+
+    // Toggle first image visibility if we are no longer a filter
+    if let Some((i, (_, var))) = first_image_input {
+        let index = as_param_index(i, var);
+
+        let is_image_filter = state
+            .params
+            .get(ParamIdx::IsImageFilter)?
+            .as_checkbox()?
+            .value();
+
+        set_param_visibility(state.in_data, index, !is_image_filter)?;
+    }
+    Ok(())
+}
+
+pub fn update_input_visibilities(
     state: &mut crate::PluginState,
     local: &mut crate::instance::Instance,
 ) -> Result<(), ae::Error> {
-    for i in ParamIdx::IsImageFilter.idx()..state.params.num_params() as i32 {
-        set_param_visibility(state.in_data, ParamIdx::Dynamic(i), false)?;
-    }
+    let script_loaded = local.src.is_some();
+    let venv_loaded = local.venv_path.is_some();
+    let is_sequential = local.runner.is_sequential();
+    let render_progress = local
+        .job_id
+        .map(|id| state.global.render_progress(id) * 100.0);
 
-    if local.src.is_none() {
-        // Script
-        set_param_visibility(state.in_data, ParamIdx::LoadButton, true)?;
-        set_param_visibility(state.in_data, ParamIdx::UnloadButton, false)?;
-        set_param_visibility(state.in_data, ParamIdx::SetVenv, local.venv_path.is_none())?;
-        set_param_visibility(
-            state.in_data,
-            ParamIdx::UnsetVenv,
-            local.venv_path.is_some(),
-        )?;
-
-        set_param_visibility(state.in_data, ParamIdx::UnloadButton, false)?;
-        set_param_visibility(state.in_data, ParamIdx::ReloadButton, false)?;
-
-        // Continuous
-        set_param_visibility(state.in_data, ParamIdx::ContinuousRenderGroupBegin, false)?;
-        set_param_visibility(state.in_data, ParamIdx::StartRender, false)?;
-        set_param_visibility(state.in_data, ParamIdx::CancelRender, false)?;
-        set_param_visibility(state.in_data, ParamIdx::ContinuousRenderGroupEnd, false)?;
-
-        // Debug
-        set_param_visibility(state.in_data, ParamIdx::DebugGroupBegin, false)?;
-        set_param_visibility(state.in_data, ParamIdx::ShowDebug, false)?;
-        set_param_visibility(state.in_data, ParamIdx::DebugOffset, false)?;
-        set_param_visibility(state.in_data, ParamIdx::TemporalWindow, false)?;
-        set_param_visibility(state.in_data, ParamIdx::DebugGroupEnd, false)?;
-
-        set_param_visibility(state.in_data, ParamIdx::IsImageFilter, false)?;
-    } else {
-        set_param_visibility(state.in_data, ParamIdx::LoadButton, false)?;
-        set_param_visibility(state.in_data, ParamIdx::UnloadButton, true)?;
-        set_param_visibility(state.in_data, ParamIdx::ReloadButton, true)?;
-        set_param_visibility(state.in_data, ParamIdx::SetVenv, local.venv_path.is_none())?;
-        set_param_visibility(
-            state.in_data,
-            ParamIdx::UnsetVenv,
-            local.venv_path.is_some(),
-        )?;
-
-        // Debug
-        set_param_visibility(state.in_data, ParamIdx::DebugGroupBegin, true)?;
-        set_param_visibility(state.in_data, ParamIdx::ShowDebug, true)?;
-        set_param_visibility(state.in_data, ParamIdx::DebugOffset, true)?;
-        set_param_visibility(state.in_data, ParamIdx::TemporalWindow, true)?;
-
-        if local.runner.is_sequential() {
-            // Continuous
-            let render_is_active = local
-                .job_id
-                .is_some_and(|id| state.global.bg_render_is_active(id));
-
-            set_param_visibility(state.in_data, ParamIdx::ContinuousRenderGroupBegin, true)?;
-            set_param_visibility(state.in_data, ParamIdx::StartRender, !render_is_active)?;
-            set_param_visibility(state.in_data, ParamIdx::CancelRender, render_is_active)?;
-
-            let label = if render_is_active {
-                format!(
-                    "Cancel: %{:.2}",
-                    state.global.render_progress(local.job_id.unwrap()) * 100.0
-                )
-            } else {
-                String::from("Cancel")
-            };
-
-            let mut prog = state.params.get_mut(ParamIdx::CancelRender)?;
-
-            prog.set_name(&label);
-            let param_util_suite = ae::pf::suites::ParamUtils::new()?;
-            param_util_suite.update_param_ui(
-                state.in_data.effect(),
-                ParamIdx::CancelRender.idx(),
-                &prog,
-            )?;
-
-            set_param_visibility(state.in_data, ParamIdx::ContinuousRenderGroupEnd, true)?;
-        }
-
-        for (i, (_, var)) in local.runner.iter_inputs().enumerate() {
-            let index = as_param_index(i, var);
-            set_param_visibility(state.in_data, index, true)?;
-        }
-
-        let first_image_input = local
-            .runner
-            .iter_inputs()
-            .enumerate()
-            .find(|(_, (_, v))| matches!(v, Variant::Image(_)));
-
-        // only show image filter options IF we have at least one image input
-        set_param_visibility(
-            state.in_data,
-            ParamIdx::IsImageFilter,
-            first_image_input.is_some(),
-        )?;
-
-        // Toggle first image visibility if we are no longer a filter
-        if let Some((i, (_, var))) = first_image_input {
-            let index = as_param_index(i, var);
-
-            let is_image_filter = state
-                .params
-                .get(ParamIdx::IsImageFilter)?
-                .as_checkbox()?
-                .value();
-
-            set_param_visibility(state.in_data, index, !is_image_filter)?;
-        }
-    }
-
+    set_debug_vis(state, script_loaded)?;
+    set_script_vis(state, script_loaded, venv_loaded)?;
+    set_sequential_control_vis(state, is_sequential, render_progress)?;
+    set_user_param_vis(state, local, script_loaded)?;
     Ok(())
 }
 
@@ -520,20 +531,6 @@ pub fn setup_static_params(params: &mut ae::Parameters<ParamIdx>) -> Result<(), 
         },
     )?;
 
-    params.add_with_flags(
-        ParamIdx::IsImageFilter,
-        "Is Image Filter",
-        ae::CheckBoxDef::setup(|f| {
-            f.set_label("Enabled");
-            f.set_default(true);
-        }),
-        ParamFlag::CANNOT_TIME_VARY
-            | ParamFlag::TWIRLY
-            | ParamFlag::SUPERVISE
-            | ParamFlag::SKIP_REVEAL_WHEN_UNHIDDEN,
-        ae::ParamUIFlags::empty(),
-    )?;
-
     Ok(())
 }
 
@@ -541,71 +538,98 @@ pub fn setup_static_params(params: &mut ae::Parameters<ParamIdx>) -> Result<(), 
 // a single input variant in the render context
 pub fn create_variant_backing(params: &mut ae::Parameters<ParamIdx>) -> Result<(), Error> {
     let mut base_index = STATIC_PARAMS_OFFSET;
-    for _ in 0..MAX_INPUTS {
-        for offset in 0..PARAM_TYPE_COUNT {
-            let name = format!("INPUT {}", base_index + offset);
-            let index = ParamIdx::Dynamic(base_index + offset);
-            let ui_flags = ae::ParamUIFlags::empty();
-            let param_flag = ParamFlag::TWIRLY | ParamFlag::SKIP_REVEAL_WHEN_UNHIDDEN;
-            match offset as usize {
-                f if f == AeVariant::Float as usize => params.add_with_flags(
-                    index,
-                    &name,
-                    ae::FloatSliderDef::setup(float),
-                    param_flag,
-                    ui_flags,
-                )?,
-                i if i == AeVariant::Int as usize => params.add_with_flags(
-                    index,
-                    &name,
-                    ae::SliderDef::setup(int),
-                    param_flag,
-                    ui_flags,
-                )?,
-                i if i == AeVariant::IntList as usize => params.add_with_flags(
-                    index,
-                    &name,
-                    ae::PopupDef::setup(options),
-                    param_flag,
-                    ui_flags,
-                )?,
-                pt if pt == AeVariant::Point as usize => params.add_with_flags(
-                    index,
-                    &name,
-                    ae::PointDef::setup(point),
-                    param_flag,
-                    ui_flags,
-                )?,
-                b if b == AeVariant::Bool as usize => params.add_with_flags(
-                    index,
-                    &name,
-                    ae::CheckBoxDef::setup(bool),
-                    param_flag,
-                    ui_flags,
-                )?,
-                c if c == AeVariant::Color as usize => params.add_with_flags(
-                    index,
-                    &name,
-                    ae::ColorDef::setup(color),
-                    param_flag,
-                    ui_flags,
-                )?,
-                i if i == AeVariant::Image as usize => params.add_with_flags(
-                    index,
-                    &name,
-                    ae::LayerDef::setup(layer),
-                    param_flag,
-                    ui_flags,
-                )?,
-                _ => {}
+    params.add_group(
+        ParamIdx::ParametersStart,
+        ParamIdx::ParametersEnd,
+        "User Parameters",
+        |params| {
+            params.add_with_flags(
+                ParamIdx::IsImageFilter,
+                "Is Image Filter",
+                ae::CheckBoxDef::setup(|f| {
+                    f.set_label("Enabled");
+                    f.set_default(true);
+                }),
+                ParamFlag::CANNOT_TIME_VARY
+                    | ParamFlag::TWIRLY
+                    | ParamFlag::SKIP_REVEAL_WHEN_UNHIDDEN,
+                ae::ParamUIFlags::empty(),
+            )?;
+
+            for _ in 0..MAX_INPUTS {
+                for offset in 0..PARAM_TYPE_COUNT {
+                    let name = format!("INPUT {}", base_index + offset);
+                    let index = ParamIdx::Dynamic(base_index + offset);
+                    let ui_flags = ae::ParamUIFlags::empty();
+                    let param_flag = ParamFlag::TWIRLY | ParamFlag::SKIP_REVEAL_WHEN_UNHIDDEN;
+                    match offset as usize {
+                        f if f == AeVariant::Float as usize => params.add_with_flags(
+                            index,
+                            &name,
+                            ae::FloatSliderDef::setup(float),
+                            param_flag,
+                            ui_flags,
+                        )?,
+                        i if i == AeVariant::Int as usize => params.add_with_flags(
+                            index,
+                            &name,
+                            ae::SliderDef::setup(int),
+                            param_flag,
+                            ui_flags,
+                        )?,
+                        i if i == AeVariant::IntList as usize => params.add_with_flags(
+                            index,
+                            &name,
+                            ae::PopupDef::setup(options),
+                            param_flag,
+                            ui_flags,
+                        )?,
+                        pt if pt == AeVariant::Point as usize => params.add_with_flags(
+                            index,
+                            &name,
+                            ae::PointDef::setup(point),
+                            param_flag,
+                            ui_flags,
+                        )?,
+                        b if b == AeVariant::Bool as usize => params.add_with_flags(
+                            index,
+                            &name,
+                            ae::CheckBoxDef::setup(bool),
+                            param_flag,
+                            ui_flags,
+                        )?,
+                        c if c == AeVariant::Color as usize => params.add_with_flags(
+                            index,
+                            &name,
+                            ae::ColorDef::setup(color),
+                            param_flag,
+                            ui_flags,
+                        )?,
+                        i if i == AeVariant::Image as usize => params.add_with_flags(
+                            index,
+                            &name,
+                            ae::LayerDef::setup(layer),
+                            param_flag,
+                            ui_flags,
+                        )?,
+                        _ => {
+                            unreachable!("Arithmetic mistake while setting up input unions.")
+                        }
+                    }
+                }
+
+                base_index += PARAM_TYPE_COUNT;
             }
-        }
-        base_index += PARAM_TYPE_COUNT;
-    }
+
+            Ok(())
+        },
+    )?;
 
     Ok(())
 }
 
+/// This is get values to pass to background thread renders
+/// it pulls data from the API meant for making panel plugins.
 pub fn set_variant_from_stream_val(
     variant: &mut Variant,
     stream_val: StreamValue,
@@ -680,7 +704,9 @@ fn bool(f: &mut ae::CheckBoxDef) {
 
 fn options(f: &mut ae::PopupDef) {
     // it is unsafe to dynamically set options
-    f.set_options(&["option 1", "option 2", "option 3", "option 4", "option 5"]);
+    // But from reading the adobe forums it *seems* like it
+    // is okay IFF you set the num options constant, so I pad with "-"
+    f.set_options(&["option"; 8]);
     f.set_default(0);
 }
 

@@ -18,7 +18,7 @@ use std::sync::Arc;
 #[repr(i32)]
 #[derive(Debug, PartialEq, PartialOrd, Clone, Copy, Hash, Eq)]
 pub enum ParamIdx {
-    ScriptGroupStart,
+    ScriptGroupStart = 1,
     LoadButton,
     UnloadButton,
     SetVenv,
@@ -35,6 +35,8 @@ pub enum ParamIdx {
     StartRender,
     CancelRender,
     ContinuousRenderGroupEnd,
+    ParametersStart,
+    ParametersEnd,
     Dynamic(i32),
 }
 
@@ -146,7 +148,7 @@ impl AdobePluginInstance for CrossThreadInstance {
                 if let Some(local) = self.get() {
                     let mut self_ = local.write();
                     param_util::update_param_defaults_and_labels(plugin, &mut self_)?;
-                    param_util::update_param_ui(plugin, &mut self_)?;
+                    param_util::update_input_visibilities(plugin, &mut self_)?;
                 }
             }
             Command::UserChangedParam { param_index } => {
@@ -191,6 +193,7 @@ impl AdobePluginInstance for CrossThreadInstance {
             }
             Command::SequenceResetup => {
                 let Some(local) = self.get() else {
+                    log::error!("SequenceResetup Failed");
                     return Err(Error::Generic);
                 };
                 let mut local = local.write();
@@ -221,7 +224,10 @@ impl AdobePluginInstance for CrossThreadInstance {
     }
 
     fn flatten(&self) -> Result<(u16, Vec<u8>), Error> {
-        let out = bincode::serialize(&self).map_err(|_| Error::Generic)?;
+        let out = bincode::serialize(&self).map_err(|_| {
+            log::error!("Serialization Error");
+            Error::Generic
+        })?;
         Ok((1, out))
     }
 
@@ -232,7 +238,10 @@ impl AdobePluginInstance for CrossThreadInstance {
                     bincode::deserialize(serialized).map_err(|_| Error::Generic)?;
                 Ok(out)
             }
-            _ => Err(Error::Generic),
+            _ => {
+                log::error!("Deserialization Error");
+                Err(Error::Generic)
+            }
         }
     }
 

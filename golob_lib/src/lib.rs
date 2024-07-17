@@ -1,13 +1,12 @@
-use errors::StdOutCatcher;
+use errors::{traceback, StdOutCatcher};
 use pyo3::types::IntoPyDict;
-use rayon::prelude::*;
 pub mod context;
 mod errors;
 pub mod event_loop;
 pub mod variant;
 
 use indexmap::IndexMap;
-use numpy::{npyffi, PyArrayMethods, PY_ARRAY_API};
+use numpy::{npyffi, PY_ARRAY_API};
 use std::{
     path::{Path, PathBuf},
     sync::mpsc::Receiver,
@@ -78,6 +77,15 @@ pub struct OutDesc<'a> {
 }
 
 impl<'a> OutDesc<'a> {
+    pub fn empty() -> Self {
+        Self {
+            fmt: ImageFormat::Rgba8,
+            data: &mut [],
+            width: 0,
+            height: 0,
+            stride: None,
+        }
+    }
     pub fn is_well_structured(&self) -> Result<(), GolobulError> {
         let bytes_per_pixel = self.fmt.bytes_per_pixel();
         let row_size = self.width as usize * bytes_per_pixel;
@@ -97,74 +105,6 @@ impl<'a> OutDesc<'a> {
 
         Ok(())
     }
-
-    pub fn allocate_proxy_array<'py>(
-        &mut self,
-        py: Python<'py>,
-        OutputSize { width, height }: OutputSize,
-    ) -> Bound<'py, PyAny> {
-        let dims = [height as usize, width as usize, 4];
-        match self.fmt {
-            ImageFormat::Rgba8 | ImageFormat::Argb8 => {
-                numpy::PyArray3::<u8>::zeros_bound(py, dims, false).into_any()
-            }
-            ImageFormat::Rgba16 | ImageFormat::Argb16ae => {
-                numpy::PyArray3::<u16>::zeros_bound(py, dims, false).into_any()
-            }
-            ImageFormat::Argb32 | ImageFormat::Rgba32 => {
-                numpy::PyArray3::<f32>::zeros_bound(py, dims, false).into_any()
-            }
-        }
-    }
-
-    pub fn blit_from_pyarray(
-        &mut self,
-        py: Python,
-        run_output: &Py<PyAny>,
-    ) -> Result<(), GolobulError> {
-        self.data.fill(0);
-
-        match self.fmt {
-            ImageFormat::Rgba8 | ImageFormat::Argb8 => {
-                let arr = run_output
-                    .downcast_bound::<numpy::PyArray3<u8>>(py)
-                    .map_err(|_| GolobulError::CastingError)?;
-
-                let original_slice = arr.readonly();
-                let slice = original_slice.as_slice().map_err(GolobulError::from)?;
-
-                let src_bytes = bytemuck::cast_slice(slice);
-                let dims = arr.dims();
-
-                blit_image(src_bytes, (dims[1], dims[0]), self);
-            }
-            ImageFormat::Rgba16 | ImageFormat::Argb16ae => {
-                let arr = run_output
-                    .downcast_bound::<numpy::PyArray3<u16>>(py)
-                    .map_err(|_| GolobulError::CastingError)?;
-
-                let original_slice = arr.readonly();
-                let slice = original_slice.as_slice().map_err(GolobulError::from)?;
-                let src_bytes = bytemuck::cast_slice(slice);
-                let dims = arr.dims();
-
-                blit_image(src_bytes, (dims[1], dims[0]), self);
-            }
-            ImageFormat::Rgba32 | ImageFormat::Argb32 => {
-                let arr = run_output
-                    .downcast_bound::<numpy::PyArray3<f32>>(py)
-                    .map_err(|_| GolobulError::CastingError)?;
-
-                let original_slice = arr.readonly();
-                let slice = original_slice.as_slice().map_err(GolobulError::from)?;
-                let src_bytes = bytemuck::cast_slice(slice);
-                let dims = arr.dims();
-
-                blit_image(src_bytes, (dims[1], dims[0]), self);
-            }
-        };
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,15 +115,31 @@ pub struct OutputSize {
 
 #[derive(Debug, Clone)]
 pub struct PythonRunner {
+    /// The main script module loaded by the user.
     script_module: Py<PyModule>,
+    /// Numpy helper
+    helper_module: Py<PyModule>,
+    /// Global python asyncio event loop running on a background thread, on windows this
+    /// must be initialized form the main thread.
     event_loop: Py<PyAny>,
+    /// Registry of all the inputs
     registry: IndexMap<String, Variant>,
-    // move this to renderpass.
+    /// Time that can be set by the user, single special case float input
     time: f32,
+    /// The user requested outputsize that we will do out best to respect
     output_size: Option<OutputSize>,
+    /// Should be named `sites_packages_path`, another module search path.
     pyenv_path: Option<PathBuf>,
+    /// Additionaly module search path
     script_parent_directory: Option<PathBuf>,
+    /// If true then AE instances will have the option to render on a BG thread
+    /// serially.
     is_sequential: bool,
+    /// if true, we call finalization the output arrays and swizzle the views into the input
+    /// arrays.
+    uses_automatic_color_correction: bool,
+    /// If true, setup has run successfully
+    initialized: bool,
 }
 
 const DEFAULT_SCRIPT: &str = r"
@@ -238,7 +194,7 @@ impl PythonRunner {
         pyo3::prepare_freethreaded_python();
         let event_loop = event_loop::get_event_loop();
 
-        Python::with_gil(|py| {
+        let helper_module: Py<PyModule> = Python::with_gil(|py| {
             let asyncio = py
                 .import_bound("asyncio")
                 .expect("Failed to import asyncio");
@@ -246,11 +202,25 @@ impl PythonRunner {
             asyncio
                 .call_method1("set_event_loop", (&event_loop.clone(),))
                 .expect("Failed to set event loop");
-        });
+
+            let module = PyModule::from_code_bound(
+                py,
+                include_str!("./numpy_helper.py"),
+                "helper.py",
+                "helper",
+            )
+            .map_err(|e| {
+                e.display(py);
+                GolobulError::InvalidModule(format!("{e:?}"))
+            })?;
+
+            Ok::<_, GolobulError>(module.into())
+        })?;
 
         let script_module = load_module(src, file_name)?;
 
         let mut out = PythonRunner {
+            helper_module,
             event_loop,
             script_module,
             registry: IndexMap::new(),
@@ -259,6 +229,8 @@ impl PythonRunner {
             pyenv_path: None,
             script_parent_directory: None,
             is_sequential: false,
+            uses_automatic_color_correction: true,
+            initialized: false,
         };
 
         out.setup()?;
@@ -283,6 +255,7 @@ impl PythonRunner {
         let new_mod = load_module(src, file_name)?;
 
         self.script_module = new_mod;
+        self.initialized = false;
 
         self.setup()
     }
@@ -339,79 +312,51 @@ impl PythonRunner {
     }
 
     // Runs then returns the contents of stdout if it exists
-    // TODO: dry up the futuristic path, it duplicates too much
-    // error handling and reporting code from the sync path.
     fn run(
         &mut self,
         inputs: IndexMap<String, InDesc>,
         mut output: OutDesc,
     ) -> Result<Option<String>, GolobulError> {
         output.is_well_structured()?;
-        let mut proxy_buffer = false;
 
         let result = Python::with_gil(|py| -> Result<MaybeFuture, GolobulError> {
-            let out_catcher =
-                Py::new(py, StdOutCatcher::default()).map_err(|_| GolobulError::BoundError)?;
-
-            let sys = py
-                .import_bound("sys")
-                .map_err(|_| GolobulError::BoundError)?;
-
-            sys.setattr("stdout", &out_catcher)
-                .map_err(|_| GolobulError::InvalidModule("Could not set stdout".to_owned()))?;
+            let out_catcher = StdOutCatcher::new(py)?;
 
             let inputs = inputs
                 .iter()
                 .map(|(k, v)| {
                     let view = slice_view(v, &py);
-                    (k.clone(), view.into_py(py))
+                    (k.clone(), (view.into_py(py), v.fmt))
                 })
                 .collect();
 
-            // Sad Path, build a new contigous image of the right size.
-            let py_out = if self
-                .output_size
-                .as_ref()
-                .is_some_and(|size| size.width != output.width || size.height != output.width)
-            {
-                proxy_buffer = true;
-                output.allocate_proxy_array(py, self.output_size.clone().unwrap())
-            } else {
-                // Happy Path, no blitting required
-                mutable_slice_view(&mut output, &py)
-            };
+            let target_image = mutable_slice_view(&mut output, &py);
 
-            let ctx = Py::new(
-                py,
-                context::PyContext::new(
-                    output.fmt,
-                    inputs,
-                    py_out.into_py(py),
-                    self.time,
-                    Some(self.registry.clone()),
-                    false,
-                    self.is_sequential,
-                ),
-            )
-            .map_err(|_| GolobulError::BoundError)?;
+            let ctx = context::PyContext::new(&output, inputs, target_image.into_py(py), self);
+
+            let ctx = Py::new(py, ctx).map_err(|_| GolobulError::BoundError)?;
 
             let maybe_future = self
                 .script_module
                 .call_method1(py, "run", (&ctx,))
-                .map_err(|e| {
-                    let line = e
-                        .traceback_bound(py)
-                        .and_then(|tb| tb.getattr("tb_lineno").ok())
-                        .map(|e| format!("line {e}: "))
-                        .unwrap_or_default();
+                .map_err(|e| traceback(e, &out_catcher, py));
 
-                    let stdout = out_catcher.borrow_mut(py).output.take();
+            // Throw recoverable error if descriptor was bad.
+            if maybe_future.is_err()
+                && ctx
+                    .borrow(py)
+                    .output_size_requested()
+                    .is_some_and(|size| size.width > output.width || size.height > output.height)
+            {
+                self.output_size = ctx.borrow(py).output_size_requested();
+                let s = self.output_size.clone().unwrap();
+                return Err(GolobulError::OutputSizeTooLarge {
+                    req: (s.height, s.width),
+                    avail: (output.height, output.width),
+                });
+            }
 
-                    GolobulError::RuntimeError {
-                        stderr: format!("{line}{e}"),
-                        stdout,
-                    }
-                })?;
+            let maybe_future = maybe_future?;
 
             if is_awaitable(py, &maybe_future).unwrap() {
                 let asio = py.import_bound("asyncio").map_err(|_| GolobulError::Asio)?;
@@ -431,22 +376,7 @@ impl PythonRunner {
 
                 Ok(MaybeFuture::Channel(rust_chan, ctx, out_catcher))
             } else {
-                let ctx_ref = ctx.borrow(py);
-
-                // this means we reallocated during call to `run`
-                if let Some(size) = ctx_ref.output_size_requested() {
-                    proxy_buffer = true;
-                    self.output_size = Some(size);
-                }
-
-                // we only need to copy if we allocated the output
-                // The allocated output is always perfectly aligned
-                if proxy_buffer {
-                    let run_output = ctx_ref.get_output();
-                    output.blit_from_pyarray(py, run_output)?;
-                }
-
-                let out = out_catcher.borrow_mut(py).output.take();
+                let out = self.finalize(&ctx, &py, &mut output, &out_catcher)?;
                 Ok(MaybeFuture::Done(out))
             }
         })?;
@@ -455,44 +385,36 @@ impl PythonRunner {
             MaybeFuture::Done(result) => Ok(result),
             MaybeFuture::Channel(rx, ctx, out_catcher) => match rx.recv() {
                 Ok(Ok(_)) => {
-                    let out = Python::with_gil(|py| {
-                        let ctx_ref = ctx.borrow(py);
-
-                        if let Some(size) = ctx_ref.output_size_requested() {
-                            proxy_buffer = true;
-                            self.output_size = Some(size);
-                        }
-
-                        if proxy_buffer {
-                            let run_output = ctx_ref.get_output();
-                            output.blit_from_pyarray(py, run_output)?;
-                        }
-
-                        let out = out_catcher.borrow_mut(py).output.take();
-                        Ok(out)
-                    });
-                    out
+                    Python::with_gil(|py| self.finalize(&ctx, &py, &mut output, &out_catcher))
                 }
-                Ok(Err(e)) => {
-                    let out = Python::with_gil(|py| {
-                        let line = e
-                            .traceback_bound(py)
-                            .and_then(|tb| tb.getattr("tb_lineno").ok())
-                            .map(|e| format!("line {e}: "))
-                            .unwrap_or_default();
-
-                        let stdout = out_catcher.borrow_mut(py).output.take();
-
-                        GolobulError::RuntimeError {
-                            stderr: format!("{line}{e}"),
-                            stdout,
-                        }
-                    });
-                    Err(out)
-                }
+                Ok(Err(e)) => Err(Python::with_gil(|py| traceback(e, &out_catcher, py))),
                 Err(_) => Err(GolobulError::Asio),
             },
         }
+    }
+
+    fn finalize(
+        &mut self,
+        ctx: &Py<context::PyContext>,
+        py: &Python,
+        output: &mut OutDesc,
+        out_catcher: &Py<StdOutCatcher>,
+    ) -> Result<Option<String>, GolobulError> {
+        let ctx_ref = ctx.borrow(*py);
+
+        if matches!(
+            output.fmt,
+            ImageFormat::Argb8 | ImageFormat::Argb32 | ImageFormat::Argb16ae
+        ) {
+            ctx_ref.swizzle_output_to_argb(*py).unwrap();
+        }
+
+        if let Some(size) = ctx_ref.output_size_requested() {
+            self.output_size = Some(size);
+        }
+
+        let out = out_catcher.borrow_mut(*py).output.take();
+        Ok(out)
     }
 
     // runs setup, returning stdout
@@ -514,19 +436,14 @@ impl PythonRunner {
             sys.setattr("stdout", &out_catcher)
                 .map_err(|_| GolobulError::InvalidModule("Could not set stdout".to_owned()))?;
 
-            let ctx = Bound::new(
-                py,
-                context::PyContext::new(
-                    ImageFormat::Rgba8, // doesn't matter in setup
-                    Default::default(),
-                    ().into_py(py),
-                    self.time,
-                    None,
-                    true,
-                    false,
-                ),
-            )
-            .map_err(|_| GolobulError::BoundError)?;
+            let ctx = context::PyContext::new(
+                &OutDesc::empty(),
+                Default::default(),
+                ().into_py(py),
+                self,
+            );
+
+            let ctx = Bound::new(py, ctx).map_err(|_| GolobulError::BoundError)?;
 
             self.script_module
                 .call_method1(py, "setup", (&ctx,))
@@ -542,13 +459,15 @@ impl PythonRunner {
 
             for (k, v) in registry.iter_mut() {
                 if let Some(entry) = self.registry.get_mut(k) {
-                    v.adopt(entry)?;
+                    let _ = v.adopt(entry);
                 }
             }
 
             self.output_size = ctx.borrow().output_size_requested();
             self.is_sequential = ctx.borrow().is_sequential_mode();
+            self.uses_automatic_color_correction = ctx.borrow().color_corrected();
             self.registry = registry;
+            self.initialized = true;
 
             let out = out_catcher.borrow_mut().output.take();
             Ok(out)
@@ -739,45 +658,6 @@ fn slice_view<'a>(in_desc: &InDesc, py: &'a Python) -> pyo3::Bound<'a, PyAny> {
 
         Bound::from_borrowed_ptr(*py, py_array_slice)
     }
-}
-
-fn blit_image(input: &[u8], (input_width, input_height): (usize, usize), out_desc: &mut OutDesc) {
-    let OutDesc {
-        fmt,
-        data,
-        width,
-        height,
-        stride,
-    } = out_desc;
-
-    let output = data;
-    let output_width = *width as usize;
-    let output_height = *height as usize;
-    let padded_output_stride = stride.map(|s| s as usize);
-
-    let bytes_per_pixel = fmt.bytes_per_pixel();
-
-    let input_stride = input_width * bytes_per_pixel;
-
-    let output_stride = output_width * bytes_per_pixel;
-    let output_chunk_size = padded_output_stride.unwrap_or(output_stride);
-
-    let input_chunks = input.par_chunks_exact(input_stride);
-    let output_chunks = output.par_chunks_exact_mut(output_chunk_size);
-
-    // skip the first n rows
-    let skip_rows = output_height.saturating_sub(input_height) / 2;
-    let taken = output_chunks.skip(skip_rows);
-
-    let stride = input_stride.min(output_stride);
-    let skip_cols = stride.saturating_sub(input_stride) / 2;
-    let padding_start = output_chunk_size.saturating_sub(output_stride);
-
-    input_chunks.zip(taken).for_each(|(inp, out)| {
-        let len = out.len();
-        let out: &mut [u8] = &mut out[0..len - padding_start];
-        out[skip_cols..skip_cols + stride].copy_from_slice(&inp[..stride]);
-    });
 }
 
 fn is_awaitable(py: Python, obj: &Py<PyAny>) -> PyResult<bool> {

@@ -4,7 +4,6 @@ mod util;
 
 use eframe::*;
 use egui::TextureHandle;
-use log::info;
 use std::sync::{Arc, RwLock};
 use std::{collections::HashMap, path::PathBuf};
 use util::*;
@@ -48,7 +47,6 @@ pub struct AppState {
     pub last_render_dim: [usize; 2],
     pub current_file: Arc<RwLock<Option<String>>>,
     pub input_panel_hidden: bool,
-    pub show_resize_dialog: bool,
     pub draw_continuously: bool,
     pub eager_updates: bool,
     pub show_logs: bool,
@@ -95,7 +93,6 @@ impl PlayGround {
                 loaded_images: Arc::default(),
                 current_file: Arc::default(),
                 input_panel_hidden: false,
-                show_resize_dialog: false,
                 draw_continuously: false,
                 show_logs: false,
                 eager_updates: true,
@@ -189,12 +186,14 @@ impl eframe::App for PlayGround {
                 });
 
                 ui.menu_button("Options", |ui| {
-                    if ui.button("Resize Output Image").clicked() {
-                        self.state.show_resize_dialog = true;
-                    }
+                    ui.checkbox(&mut self.state.draw_continuously, "animate script");
+                    ui.checkbox(&mut self.state.eager_updates, "eagerly update inputs");
+                    ui.checkbox(&mut self.state.show_logs, "show logs");
 
-                    let before = self.state.filter_type.clone();
-                    egui::ComboBox::from_label("Filter Type")
+                    ui.separator();
+
+                    let before = self.state.filter_type;
+                    egui::ComboBox::from_label("Select Filter Type")
                         .selected_text(format!("{:?}", self.state.filter_type))
                         .show_ui(ui, |ui| {
                             ui.selectable_value(
@@ -216,17 +215,9 @@ impl eframe::App for PlayGround {
                             })
                             .unwrap();
                     }
-
-                    ui.checkbox(&mut self.state.draw_continuously, "animate script");
-                    ui.checkbox(&mut self.state.eager_updates, "eagerly update inputs");
-                    ui.checkbox(&mut self.state.show_logs, "show logs");
                 });
             });
         });
-
-        if self.state.show_resize_dialog {
-            util::resize_dialog(&mut self.state, &mut self.runner, ctx);
-        }
 
         egui::SidePanel::new(egui::panel::Side::Left, "User Inputs").show_animated(
             ctx,
@@ -284,9 +275,10 @@ impl eframe::App for PlayGround {
             });
 
         if self.state.draw_continuously {
-            ctx.request_repaint_after(std::time::Duration::from_millis(16));
             self.runner.sender.send(AppMessage::Render).unwrap();
         }
+
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
 }
 

@@ -3,6 +3,10 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum GolobulError {
+    #[error(
+        "You requested an output of size {req:?}, that was larger than the max dimensions, {avail:?}, provided"
+    )]
+    OutputSizeTooLarge { req: (u32, u32), avail: (u32, u32) },
     #[error("Error updating dll path, cannot start.")]
     DllSearchError,
     #[error("Invalid Module: {0}")]
@@ -33,13 +37,43 @@ pub enum GolobulError {
     #[error("Type mismatch while setting variable.")]
     TypeMismatch,
     #[error("No Input {0} found")]
-    MissingVar(String)
+    MissingVar(String),
+}
+
+pub fn traceback(e: PyErr, stdout: &Py<StdOutCatcher>, py: Python) -> GolobulError {
+    let line = e
+        .traceback_bound(py)
+        .and_then(|tb| tb.getattr("tb_lineno").ok())
+        .map(|e| format!("line {e}: "))
+        .unwrap_or_default();
+
+    let stdout = stdout.borrow_mut(py).output.take();
+
+    GolobulError::RuntimeError {
+        stderr: format!("{line}{e}"),
+        stdout,
+    }
 }
 
 #[pyclass]
 #[derive(Default)]
 pub struct StdOutCatcher {
     pub output: Option<String>,
+}
+impl StdOutCatcher {
+    pub fn new(py: Python) -> Result<Py<Self>, GolobulError> {
+        let out_catcher =
+            Py::new(py, StdOutCatcher::default()).map_err(|_| GolobulError::BoundError)?;
+
+        let sys = py
+            .import_bound("sys")
+            .map_err(|_| GolobulError::BoundError)?;
+
+        sys.setattr("stdout", &out_catcher)
+            .map_err(|_| GolobulError::InvalidModule("Could not set stdout".to_owned()))?;
+
+        Ok(out_catcher)
+    }
 }
 
 #[pymethods]

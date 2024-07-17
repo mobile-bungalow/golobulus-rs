@@ -3,7 +3,6 @@ use golob_lib::PythonRunner;
 use image::imageops::FilterType::Triangle;
 use notify::*;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{mpsc::Sender, Arc};
 
 #[derive(Debug, Clone)]
@@ -24,7 +23,7 @@ fn render(
     time: f32,
     width: &mut usize,
     height: &mut usize,
-    mut buf: &mut Vec<u8>,
+    buf: &mut Vec<u8>,
     runner: &mut PythonRunner,
     image_inputs: &HashMap<String, crate::ImageDesc>,
     mut target: egui::TextureHandle,
@@ -38,7 +37,7 @@ fn render(
     buf.fill(0);
     let o = golob_lib::OutDesc {
         fmt: golob_lib::ImageFormat::Rgba8,
-        data: &mut buf,
+        data: buf,
         height: *height as u32,
         width: *width as u32,
         stride: None,
@@ -304,12 +303,25 @@ pub fn spawn_render_thread(mut target: egui::TextureHandle) -> RunnerState {
                     );
                 }
                 crate::AppMessage::ScreenShot { params } => {
-                    let Some(file) = tinyfiledialogs::save_file_dialog("Save Screenshot", "/")
+                    let home_dir = match homedir::get_my_home() {
+                        Ok(Some(home)) => home,
+                        _ => "/".into(),
+                    };
+
+                    let home_dir = current_path
+                        .as_ref()
+                        .and_then(|p| p.parent())
+                        .unwrap_or(&home_dir);
+
+                    let Some(file) = rfd::FileDialog::new()
+                        .set_directory(home_dir)
+                        .set_file_name("screenshot.png")
+                        .save_file()
                     else {
                         continue;
                     };
 
-                    let mut file = PathBuf::from(file);
+                    let mut file = file;
 
                     let mut image = image::RgbaImage::from_raw(
                         width as u32,
@@ -324,7 +336,7 @@ pub fn spawn_render_thread(mut target: egui::TextureHandle) -> RunnerState {
                             egui::TextureFilter::Linear => Triangle,
                         };
 
-                        image = image::imageops::resize(&image, width, height, filter).into();
+                        image = image::imageops::resize(&image, width, height, filter);
                     }
 
                     if file.extension().is_none() {

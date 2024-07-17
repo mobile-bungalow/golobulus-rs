@@ -7,18 +7,34 @@ pub fn launch_script_dialog(
     current_script: Arc<RwLock<Option<String>>>,
 ) {
     std::thread::spawn(move || {
-        let file_path = tinyfiledialogs::open_file_dialog("Load a python script", "/", None);
+        let home_dir = match homedir::get_my_home() {
+            Ok(Some(home)) => home,
+            _ => "/".into(),
+        };
 
-        if let Some(file_path) = file_path {
-            let path = std::path::PathBuf::from(file_path);
+        let home_dir = current_script
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|p| PathBuf::from(p).parent().unwrap().to_owned())
+            .unwrap_or(home_dir);
 
-            *current_script.write().unwrap() =
-                Some(path.file_name().unwrap().to_string_lossy().to_string());
+        let Some(file_path) = rfd::FileDialog::new()
+            .set_directory(home_dir)
+            .add_filter("python", &["py"])
+            .pick_file()
+        else {
+            return;
+        };
 
-            let _ = sender.send(AppMessage::LoadScript { path });
+        let path = file_path;
 
-            ctx.request_repaint();
-        }
+        *current_script.write().unwrap() =
+            Some(path.file_name().unwrap().to_string_lossy().to_string());
+
+        let _ = sender.send(AppMessage::LoadScript { path });
+
+        ctx.request_repaint();
     });
 }
 
@@ -29,42 +45,31 @@ pub fn launch_image_dialog(
     entries: Arc<RwLock<HashMap<String, PathBuf>>>,
 ) {
     std::thread::spawn(move || {
-        let file_path = tinyfiledialogs::open_file_dialog("Load an Image or Video", "/", None);
+        let home_dir = match homedir::get_my_home() {
+            Ok(Some(home)) => home,
+            _ => "/".into(),
+        };
 
-        if let Some(file_path) = file_path {
-            let path = std::path::PathBuf::from(file_path);
-            let path_clone = path.clone();
-            entries.write().unwrap().insert(var.clone(), path_clone);
-            let _ = sender.send(AppMessage::LoadImage { path, var });
-            ctx.request_repaint();
-        }
-    });
-}
+        let first_image = entries
+            .read()
+            .ok()
+            .and_then(|ok| ok.values().next().cloned());
 
-pub fn resize_dialog(
-    app_state: &mut AppState,
-    runner_state: &mut background_thread::RunnerState,
-    ctx: &egui::Context,
-) {
-    egui::Window::new("Resize Output Image").show(ctx, |ui| {
-        ui.add(egui::Slider::new(&mut app_state.staging_size[0], 1..=4096).text("Width"));
-        ui.add(egui::Slider::new(&mut app_state.staging_size[1], 1..=4096).text("Height"));
+        let home_dir = first_image.unwrap_or(home_dir);
 
-        if ui.button("Resize").clicked() {
-            runner_state
-                .sender
-                .send(AppMessage::ResizeOutput {
-                    width: app_state.staging_size[0] as u32,
-                    height: app_state.staging_size[1] as u32,
-                })
-                .unwrap();
-            app_state.show_resize_dialog = false;
-            info!("resizing output image");
-        }
+        let Some(file_path) = rfd::FileDialog::new()
+            .set_directory(home_dir)
+            .add_filter("image", &["png", "jpeg", "jpg", "exr", "webm"])
+            .pick_file()
+        else {
+            return;
+        };
 
-        if ui.button("Cancel").clicked() {
-            app_state.show_resize_dialog = false;
-        }
+        let path = file_path;
+        let path_clone = path.clone();
+        entries.write().unwrap().insert(var.clone(), path_clone);
+        let _ = sender.send(AppMessage::LoadImage { path, var });
+        ctx.request_repaint();
     });
 }
 

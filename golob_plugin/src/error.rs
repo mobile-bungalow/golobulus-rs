@@ -15,16 +15,20 @@ pub fn handle_run_output(instance: &mut crate::instance::Instance, time: i32, ou
             instance.timestamped_log.insert(time, out);
         }
         Err(e) => {
-            if let golob_lib::GolobulError::RuntimeError { stderr, stdout } = e {
-                if let Some(stdout) = stdout {
-                    info!("{}", stdout.trim_end());
-                    instance.timestamped_log.insert(time, stdout);
+            error!("Error: {e:?}");
+            match e {
+                golob_lib::GolobulError::RuntimeError { stderr, stdout } => {
+                    if let Some(stdout) = stdout {
+                        info!("{}", stdout.trim_end());
+                        instance.timestamped_log.insert(time, stdout);
+                    }
+                    instance.timestamped_error_log.insert(time, stderr);
                 }
-                error!(" {stderr:?}");
-                instance.timestamped_error_log.insert(time, stderr);
-            } else {
-                error!(" {e:?}");
-            }
+                e @ golob_lib::GolobulError::OutputSizeTooLarge { .. } => {
+                    instance.timestamped_error_log.insert(time, format!("{e}"));
+                }
+                _ => {}
+            };
         }
         _ => {}
     };

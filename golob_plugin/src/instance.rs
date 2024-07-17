@@ -156,6 +156,13 @@ impl Instance {
 
         let mut out_layer = cb.checkout_output()?;
 
+        // Zero the target,
+        // we need to do this because
+        // requests to scale down could
+        // produce garbage memory in the image
+        // margins.
+        out_layer.fill(None, None)?;
+
         let stride = out_layer.buffer_stride();
 
         let output = OutDesc {
@@ -238,42 +245,14 @@ impl Instance {
         ) {
             req.rect = width_test.max_result_rect;
 
-            let full_checkout = if let Some(requested_size) = self.runner.requested_output_resize()
-            {
-                // Centers the target region and crops it to the requested dimensions
-                let golob_lib::OutputSize { width, height } = requested_size;
-                let max_width = (req.rect.left - req.rect.right).unsigned_abs();
-                let max_height = (req.rect.top - req.rect.bottom).unsigned_abs();
-
-                let new_width = std::cmp::min(max_width, width);
-                let new_height = std::cmp::min(max_height, height);
-
-                let horizontal_padding = (max_width - new_width) / 2;
-                req.rect.left += horizontal_padding as i32;
-                req.rect.right -= horizontal_padding as i32;
-
-                let vertical_padding = (max_height - new_height) / 2;
-                req.rect.top -= vertical_padding as i32;
-                req.rect.bottom += vertical_padding as i32;
-
-                cb.checkout_layer(
-                    0,
-                    INPUT_LAYER_CHECKOUT_ID.idx(),
-                    &req,
-                    in_data.current_time(),
-                    in_data.time_step(),
-                    in_data.time_scale(),
-                )?
-            } else {
-                cb.checkout_layer(
-                    0,
-                    INPUT_LAYER_CHECKOUT_ID.idx(),
-                    &req,
-                    in_data.current_time(),
-                    in_data.time_step(),
-                    in_data.time_scale(),
-                )?
-            };
+            let full_checkout = cb.checkout_layer(
+                0,
+                INPUT_LAYER_CHECKOUT_ID.idx(),
+                &req,
+                in_data.current_time(),
+                in_data.time_step(),
+                in_data.time_scale(),
+            )?;
 
             extra.set_result_rect(full_checkout.result_rect.into());
             extra.set_max_result_rect(full_checkout.result_rect.into());
@@ -291,7 +270,7 @@ impl Instance {
             ParamIdx::LoadButton => {
                 self.launch_script_dialog(&mut plugin.out_data)?;
                 param_util::update_param_defaults_and_labels(plugin, self)?;
-                param_util::update_param_ui(plugin, self)?;
+                param_util::update_input_visibilities(plugin, self)?;
 
                 plugin.out_data.set_force_rerender();
             }
@@ -307,7 +286,7 @@ impl Instance {
 
                 self.runner = PythonRunner::default();
                 self.src = None;
-                param_util::update_param_ui(plugin, self)?;
+                param_util::update_input_visibilities(plugin, self)?;
                 plugin.out_data.set_force_rerender();
             }
             ParamIdx::SetVenv => {
@@ -318,7 +297,7 @@ impl Instance {
                 }
 
                 param_util::update_param_defaults_and_labels(plugin, self)?;
-                param_util::update_param_ui(plugin, self)?;
+                param_util::update_input_visibilities(plugin, self)?;
                 plugin.out_data.set_force_rerender();
             }
             ParamIdx::UnsetVenv => {
@@ -329,12 +308,12 @@ impl Instance {
                     self.try_reload(&mut plugin.out_data)?;
                 }
 
-                param_util::update_param_ui(plugin, self)?;
+                param_util::update_input_visibilities(plugin, self)?;
                 plugin.out_data.set_force_rerender();
             }
             ParamIdx::ReloadButton => {
                 self.try_reload(&mut plugin.out_data)?;
-                param_util::update_param_ui(plugin, self)?;
+                param_util::update_input_visibilities(plugin, self)?;
                 plugin.out_data.set_force_rerender();
             }
             ParamIdx::CancelRender => {
@@ -446,7 +425,7 @@ impl Instance {
 
                     param_util::set_param_visibility(plugin.in_data, index, !is_image_filter)?;
 
-                    param_util::update_param_ui(plugin, self)?;
+                    param_util::update_input_visibilities(plugin, self)?;
                     plugin.out_data.set_force_rerender();
                 }
             }

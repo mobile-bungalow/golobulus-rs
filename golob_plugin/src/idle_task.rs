@@ -34,7 +34,7 @@ fn idle_callback(
     let mut cleanup_tasks = vec![];
 
     for key in keys.iter() {
-        let TryResult::Present(mut background_task) = idle_task_info.task_map.try_get_mut(&key)
+        let TryResult::Present(mut background_task) = idle_task_info.task_map.try_get_mut(key)
         else {
             log::debug!("bg task {key} locked, continuing.");
             continue;
@@ -47,7 +47,7 @@ fn idle_callback(
                 let res: Result<(), ae::Error> = crate::MAIN_THREAD_IDLE_DATA.with(|data| {
                     let mut data = data.borrow_mut();
 
-                    let Some(main_thread_data) = data.get_mut(&key) else {
+                    let Some(main_thread_data) = data.get_mut(key) else {
                         log::error!("Missing main thread data in background job! bailing.");
                         return Err(ae::Error::Generic);
                     };
@@ -70,7 +70,7 @@ fn idle_callback(
             crate::background_task::TaskStatus::Done => {
                 log::debug!("bg task {key} done, loading footage.");
                 let e: Result<(), ae::Error> = crate::MAIN_THREAD_IDLE_DATA.with(|data| {
-                    if let Some(cleanup_task) = data.borrow_mut().remove(&key) {
+                    if let Some(cleanup_task) = data.borrow_mut().remove(key) {
                         cleanup_tasks.push(cleanup_task);
                     }
                     Ok(())

@@ -118,7 +118,7 @@ fn draw_text(
                         // There are no monospace fonts and no layout information
                         // so ad hoc background boxes it is. 0.6 em is the monospaced AR so
                         // it's a fair guess.
-                        // TODO: find any principled way to draw this background rect.
+                        // FIXME: find any principled way to draw this background rect.
                         width: (line.len() as f32 * font_width * 0.6),
                         height: font_width,
                     },

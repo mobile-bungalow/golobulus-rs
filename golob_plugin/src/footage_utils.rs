@@ -200,9 +200,9 @@ pub fn output_dir_name(
         name
     };
     // pretty bad sanitization but should work for now
-    let name = name.replace(":", "-");
-    let name = name.replace("/", "-");
-    let name = name.replace("\\", "-");
+    let name = name.replace(':', "-");
+    let name = name.replace('/', "-");
+    let name = name.replace('\\', "-");
     // file name *.aep
     project_path.pop();
     let output_dir = project_path.join(name);

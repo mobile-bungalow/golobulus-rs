@@ -85,7 +85,7 @@ pub struct OutputDesc {
 
 impl OutputDesc {
     pub fn buffer_len(&self) -> usize {
-        self.width as usize * self.height as usize * self.fmt.bytes_per_pixel() 
+        self.width as usize * self.height as usize * self.fmt.bytes_per_pixel()
     }
 }
 
@@ -97,7 +97,7 @@ impl BackgroundTask {
     pub fn spawn_task(
         id: JobId,
         mut runner: PythonRunner,
-        desc: OutputDesc,
+        mut desc: OutputDesc,
         task_pool: Arc<dashmap::DashMap<JobId, BackgroundTask>>,
     ) {
         let (tx, rx) = channel();
@@ -106,6 +106,13 @@ impl BackgroundTask {
             tx,
             status: TaskStatus::Ready,
             buffers: vec![],
+        };
+
+        desc.fmt = match desc.fmt {
+            golob_lib::ImageFormat::Argb8 => golob_lib::ImageFormat::Rgba8,
+            golob_lib::ImageFormat::Argb16ae => golob_lib::ImageFormat::Rgba16,
+            golob_lib::ImageFormat::Argb32 => golob_lib::ImageFormat::Rgba32,
+            sane => sane,
         };
 
         task_pool.insert(id, task);
@@ -125,12 +132,14 @@ impl BackgroundTask {
                             let _ = runner.try_set_var(&input_name, input_value);
                         }
 
+                        output_buffer.fill(0);
+
                         let output = golob_lib::OutDesc {
                             fmt: desc.fmt,
                             width: desc.width,
                             height: desc.height,
                             data: &mut output_buffer,
-                            stride: None,
+                            stride: None, // buffer is aligned, no padding
                         };
 
                         runner.set_time(time);
@@ -150,34 +159,36 @@ impl BackgroundTask {
 
                         let res = render_pass.submit();
 
-                        let name = format!(
-                            "{:0width$}",
-                            frame,
-                            width = desc.last_frame.to_string().len()
-                        );
+                        let name =
+                            format!("{frame:0pad$}", pad = desc.last_frame.to_string().len());
 
                         match res {
-                            Ok(_) if frame == desc.last_frame => {
-                                // save frame
-                                let _ = footage_utils::write_image_to_file(
-                                    desc.directory.join(name),
-                                    &output_buffer,
-                                    desc.width,
-                                    desc.height,
-                                    desc.fmt,
-                                );
-                                task.status = TaskStatus::Done;
-                                break;
-                            }
                             Ok(_) => {
-                                let _ = footage_utils::write_image_to_file(
+                                // save frame
+                                let e = footage_utils::write_image_to_file(
                                     desc.directory.join(name),
                                     &output_buffer,
                                     desc.width,
                                     desc.height,
                                     desc.fmt,
                                 );
-                                task.status = TaskStatus::Ready;
+
+                                if let Err(e) = e {
+                                    log::error!("error while writing file {e}");
+                                    task.status = TaskStatus::Error {
+                                        stdout: None,
+                                        error: format!("{e:?}"),
+                                    };
+                                    let _ = std::fs::remove_dir_all(desc.directory);
+                                    break;
+                                }
+
+                                if frame == desc.last_frame {
+                                    task.status = TaskStatus::Done;
+                                    break;
+                                } else {
+                                    task.status = TaskStatus::Ready;
+                                }
                             }
                             Err(e) => {
                                 log::error!("error in Background thread {id}: {e}");
@@ -189,7 +200,7 @@ impl BackgroundTask {
                     TaskMessage::Cancel => {
                         let directory = &desc.directory;
                         log::debug!("cancelling task, removing directory {directory:?}");
-                        let res = std::fs::remove_dir_all(desc.directory);
+                        let res = std::fs::remove_dir_all(directory);
                         log::debug!("{res:?}");
                         task_pool.get_mut(&id).unwrap().status = TaskStatus::Cancelled;
                         break;

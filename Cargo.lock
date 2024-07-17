@@ -1292,7 +1292,6 @@ dependencies = [
  "indexmap",
  "numpy",
  "pyo3",
- "rayon",
  "thiserror",
  "uuid",
 ]
@@ -1307,10 +1306,11 @@ dependencies = [
  "egui_plot",
  "env_logger 0.10.2",
  "golob_lib",
+ "homedir",
  "image",
  "log",
  "notify",
- "tinyfiledialogs",
+ "rfd",
 ]
 
 [[package]]
@@ -2779,16 +2779,6 @@ dependencies = [
  "flate2",
  "jpeg-decoder",
  "weezl",
-]
-
-[[package]]
-name = "tinyfiledialogs"
-version = "3.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e25fa0bc43a6566e2cc6d7ac96df3fa5a57beba34445bead1b368ba8fe9ca568"
-dependencies = [
- "cc",
- "libc",
 ]
 
 [[package]]
