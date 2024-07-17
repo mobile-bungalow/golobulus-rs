@@ -205,16 +205,19 @@ fn set_sequential_control_vis(
         ParamIdx::ContinuousRenderGroupBegin,
         is_sequential,
     )?;
+
     set_param_visibility(
         state.in_data,
         ParamIdx::StartRender,
         is_sequential && render_progress.is_none(),
     )?;
+
     set_param_visibility(
         state.in_data,
         ParamIdx::CancelRender,
         is_sequential && render_progress.is_some(),
     )?;
+
     set_param_visibility(
         state.in_data,
         ParamIdx::ContinuousRenderGroupEnd,
@@ -300,9 +303,7 @@ pub fn update_input_visibilities(
     let script_loaded = local.src.is_some();
     let venv_loaded = local.venv_path.is_some();
     let is_sequential = local.runner.is_sequential();
-    let render_progress = local
-        .job_id
-        .map(|id| state.global.render_progress(id) * 100.0);
+    let render_progress = local.job_id.and_then(|id| state.global.render_progress(id));
 
     set_debug_vis(state, script_loaded)?;
     set_script_vis(state, script_loaded, venv_loaded)?;

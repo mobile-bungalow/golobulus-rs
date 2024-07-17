@@ -23,7 +23,6 @@ fn idle_callback(
     idle_task_info: &mut IdleTaskInfo,
     _max_sleep_time: &mut i32,
 ) -> Result<(), Error> {
-
     let keys = idle_task_info
         .task_map
         .iter()
@@ -31,7 +30,7 @@ fn idle_callback(
         .collect::<Vec<_>>();
 
     let mut dead_keys = vec![];
-    let mut cleanup_tasks = vec![];
+    let mut import_tasks = vec![];
 
     for key in keys.iter() {
         let TryResult::Present(mut background_task) = idle_task_info.task_map.try_get_mut(key)
@@ -69,16 +68,14 @@ fn idle_callback(
             }
             crate::background_task::TaskStatus::Done => {
                 log::debug!("bg task {key} done, loading footage.");
-                let e: Result<(), ae::Error> = crate::MAIN_THREAD_IDLE_DATA.with(|data| {
+
+                crate::MAIN_THREAD_IDLE_DATA.with(|data| {
                     if let Some(cleanup_task) = data.borrow_mut().remove(key) {
-                        cleanup_tasks.push(cleanup_task);
+                        import_tasks.push((key, cleanup_task));
                     }
-                    Ok(())
-                });
 
-                dead_keys.push(key);
-
-                e?;
+                    Ok::<_, ae::Error>(())
+                })?;
 
                 continue;
             }
@@ -108,12 +105,13 @@ fn idle_callback(
         }
     }
 
-    for task in cleanup_tasks {
+    for (key, task) in import_tasks {
         footage_utils::import_footage(task.on_complete)?;
+        let _ = idle_task_info.task_map.remove(&key);
     }
 
     for key in dead_keys.iter() {
-        idle_task_info.cancel(**key);
+        idle_task_info.remove(**key);
     }
 
     if !keys.is_empty() {
@@ -236,8 +234,8 @@ pub struct IdleTaskInfo {
 }
 
 impl IdleTaskInfo {
-    pub fn cancel(&self, id: JobId) {
-        log::debug!("Cancelling task {id}.");
+    pub fn remove(&self, id: JobId) {
+        log::debug!("Finishing task {id}.");
         // Remove the directory of in progress pngs if it exists
         crate::MAIN_THREAD_IDLE_DATA.with(|data| {
             data.borrow_mut().remove(&id);

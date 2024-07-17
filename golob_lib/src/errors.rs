@@ -4,7 +4,7 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum GolobulError {
     #[error(
-        "You requested an output of size {req:?}, that was larger than the max dimensions, {avail:?}, provided"
+        "You requested an output of size {req:?}, that was larger than the buffer, {avail:?}, provided"
     )]
     OutputSizeTooLarge { req: (u32, u32), avail: (u32, u32) },
     #[error("Error updating dll path, cannot start.")]

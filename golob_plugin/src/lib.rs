@@ -10,6 +10,7 @@ pub(crate) mod ui;
 use after_effects as ae;
 use after_effects_sys as ae_sys;
 use background_task::{BackgroundTask, JobId};
+use golob_lib::PythonRunner;
 use idle_task::IdleTaskBundle;
 use instance::CrossThreadInstance;
 use std::cell::Cell;
@@ -51,14 +52,14 @@ impl GlobalPlugin {
         self.task_map.contains_key(&id)
     }
 
-    pub fn render_progress(&self, id: JobId) -> f32 {
+    pub fn render_progress(&self, id: JobId) -> Option<f32> {
         MAIN_THREAD_IDLE_DATA.with(|data| {
             let data = data.borrow();
             if let Some(task) = data.get(&id) {
                 let ctx = &task.task_creation_ctx;
-                ctx.current_frame as f32 / ctx.total_frames as f32
+                Some(100.0 * ctx.current_frame as f32 / ctx.total_frames as f32)
             } else {
-                0.0
+                None
             }
         })
     }
@@ -126,6 +127,9 @@ impl AdobePluginGlobal for GlobalPlugin {
                     task_map: self.task_map.clone(),
                 })?;
             }
+            Command::GlobalSetdown => {
+                CrossThreadInstance::clear_map();
+            }
             _ => {}
         };
         Ok(())
@@ -192,10 +196,13 @@ impl AdobePluginInstance for CrossThreadInstance {
                 }
             }
             Command::SequenceResetup => {
+                log::debug!("Resetup call, duplication or deserializing");
+
                 let Some(local) = self.get() else {
                     log::error!("SequenceResetup Failed");
                     return Err(Error::Generic);
                 };
+
                 let mut local = local.write();
 
                 if let Some(venv_path) = local.venv_path.as_ref() {
