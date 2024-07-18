@@ -10,9 +10,8 @@ pub(crate) mod ui;
 use after_effects as ae;
 use after_effects_sys as ae_sys;
 use background_task::{BackgroundTask, JobId};
-use golob_lib::PythonRunner;
 use idle_task::IdleTaskBundle;
-use instance::CrossThreadInstance;
+use instance::Instance;
 use std::cell::Cell;
 use std::sync::Arc;
 
@@ -75,7 +74,7 @@ thread_local! {
     static MAIN_THREAD_IDLE_DATA: RefCell<HashMap<JobId, IdleTaskBundle>> =  RefCell::new(HashMap::new()) ;
 }
 
-ae::define_effect!(GlobalPlugin, CrossThreadInstance, ParamIdx);
+ae::define_effect!(GlobalPlugin, Instance, ParamIdx);
 
 impl AdobePluginGlobal for GlobalPlugin {
     fn can_load(_host_name: &str, _host_version: &str) -> bool {
@@ -127,98 +126,59 @@ impl AdobePluginGlobal for GlobalPlugin {
                     task_map: self.task_map.clone(),
                 })?;
             }
-            Command::GlobalSetdown => {
-                CrossThreadInstance::clear_map();
-            }
             _ => {}
         };
         Ok(())
     }
 }
 
-impl AdobePluginInstance for CrossThreadInstance {
+impl AdobePluginInstance for Instance {
     fn handle_command(&mut self, plugin: &mut PluginState, command: Command) -> Result<(), Error> {
         match command {
             Command::About => plugin
                 .out_data
                 .set_return_msg("Golobulus: The adder plods where it ought not."),
             Command::Event { mut extra } => {
-                if let Some(local) = self.get() {
-                    let mut write = local.write();
-                    ui::draw(&plugin.in_data, &mut write, plugin.params, &mut extra)?;
-                }
+                ui::draw(&plugin.in_data, self, plugin.params, &mut extra)?;
             }
             Command::UpdateParamsUi => {
-                if let Some(local) = self.get() {
-                    let mut self_ = local.write();
-                    param_util::update_param_defaults_and_labels(plugin, &mut self_)?;
-                    param_util::update_input_visibilities(plugin, &mut self_)?;
-                }
+                param_util::update_param_defaults_and_labels(plugin, self)?;
+                param_util::update_input_visibilities(plugin, self)?;
             }
             Command::UserChangedParam { param_index } => {
-                let Some(local) = self.get() else {
-                    return Err(Error::Generic);
-                };
-
-                let mut local = local.write();
                 let idx = ParamIdx::from(param_index);
-                local.handle_param_interaction(plugin, idx)?;
+                self.handle_param_interaction(plugin, idx)?;
             }
             Command::SmartPreRender { mut extra } => {
-                let Some(local) = self.get() else {
-                    return Err(Error::Generic);
-                };
-
-                let mut local = local.write();
-
-                local.smart_pre_render(&plugin.in_data, &mut extra)?;
+                self.smart_pre_render(&plugin.in_data, &mut extra)?;
             }
             Command::SmartRender { extra } => {
-                let Some(local) = self.get() else {
-                    return Err(Error::Generic);
-                };
-
-                let mut local = local.write();
                 let cb = extra.callbacks();
-
-                local.smart_render(&plugin.in_data, &cb)?;
+                self.smart_render(&plugin.in_data, &cb)?;
             }
             Command::SequenceSetup => {
-                let Some(local) = self.get() else {
-                    return Err(Error::Generic);
-                };
-                let mut local = local.write();
-                if let Some(src) = local.src.clone() {
-                    local.runner.load_script(src, None).map_err(|e| {
+                if let Some(src) = self.src.clone() {
+                    self.runner.load_script(src, None).map_err(|e| {
                         error::startup_error_message(e, &mut plugin.out_data);
                         Error::Generic
                     })?;
                 }
             }
             Command::SequenceResetup => {
-                log::debug!("Resetup call, duplication or deserializing");
-
-                let Some(local) = self.get() else {
-                    log::error!("SequenceResetup Failed");
-                    return Err(Error::Generic);
-                };
-
-                let mut local = local.write();
-
-                if let Some(venv_path) = local.venv_path.as_ref() {
+                if let Some(venv_path) = self.venv_path.as_ref() {
                     let venv_path = std::path::PathBuf::from(venv_path);
-                    local.runner.set_venv_path(venv_path);
+                    self.runner.set_venv_path(venv_path);
                 }
 
-                if let Some(last_known) = local.last_known_path.as_ref() {
+                if let Some(last_known) = self.last_known_path.as_ref() {
                     let file_path = std::path::PathBuf::from(last_known);
                     if let Some(parent) = file_path.parent() {
-                        local.runner.set_script_parent_directory(parent.to_owned());
+                        self.runner.set_script_parent_directory(parent.to_owned());
                     }
                 }
 
-                if let Some(src) = local.src.clone() {
-                    local.runner.load_script(src, None).map_err(|e| {
+                if let Some(src) = self.src.clone() {
+                    self.runner.load_script(src, None).map_err(|e| {
                         error::startup_error_message(e, &mut plugin.out_data);
                         Error::Generic
                     })?;
@@ -241,8 +201,7 @@ impl AdobePluginInstance for CrossThreadInstance {
     fn unflatten(version: u16, serialized: &[u8]) -> Result<Self, Error> {
         match version {
             1 => {
-                let out: CrossThreadInstance =
-                    bincode::deserialize(serialized).map_err(|_| Error::Generic)?;
+                let out: Self = bincode::deserialize(serialized).map_err(|_| Error::Generic)?;
                 Ok(out)
             }
             _ => {

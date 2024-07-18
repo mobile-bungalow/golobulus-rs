@@ -115,6 +115,7 @@ pub struct OutputSize {
 
 #[derive(Debug, Clone)]
 pub struct PythonRunner {
+    script_module_uuid: String,
     /// The main script module loaded by the user.
     script_module: Py<PyModule>,
     /// Numpy helper
@@ -217,9 +218,10 @@ impl PythonRunner {
             Ok::<_, GolobulError>(module.into())
         })?;
 
-        let script_module = load_module(src, file_name)?;
+        let (uuid, script_module) = load_module(src, file_name)?;
 
         let mut out = PythonRunner {
+            script_module_uuid: uuid.into(),
             helper_module,
             event_loop,
             script_module,
@@ -238,6 +240,22 @@ impl PythonRunner {
         Ok(out)
     }
 
+    fn delete_module(&self) -> Result<(), PyErr> {
+        Python::with_gil(|py| {
+            let sys = py.import_bound("sys")?;
+
+            let mods = sys.getattr("modules")?;
+            let modules: &Bound<pyo3::types::PyDict> = mods.downcast()?;
+
+            let module_name = self.script_module_uuid.clone();
+            if modules.contains(&module_name)? {
+                modules.del_item(&module_name)?;
+            }
+
+            Ok(())
+        })
+    }
+
     /// Loads the given python script. returning stdout if it appeared
     pub fn load_script<S: AsRef<str>>(
         &mut self,
@@ -252,8 +270,12 @@ impl PythonRunner {
             self.add_path_to_sys(&script_dir.clone())?;
         }
 
-        let new_mod = load_module(src, file_name)?;
+        self.delete_module()
+            .map_err(|_| GolobulError::CastingError)?;
 
+        let (uuid, new_mod) = load_module(src, file_name)?;
+
+        self.script_module_uuid = uuid.into();
         self.script_module = new_mod;
         self.initialized = false;
 
@@ -546,7 +568,7 @@ impl PythonRunner {
 fn load_module<S: AsRef<str>>(
     src: S,
     file_name: Option<String>,
-) -> Result<Py<PyModule>, GolobulError> {
+) -> Result<(uuid::Uuid, Py<PyModule>), GolobulError> {
     let uuid = uuid::Uuid::new_v4();
     Python::with_gil(|py| {
         let module = PyModule::from_code_bound(
@@ -581,7 +603,7 @@ fn load_module<S: AsRef<str>>(
             Err(_) => return Err(GolobulError::MissingSetup),
         }
 
-        Ok(module.into())
+        Ok((uuid, module.into()))
     })
 }
 

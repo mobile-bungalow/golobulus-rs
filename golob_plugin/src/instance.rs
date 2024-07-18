@@ -16,8 +16,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-after_effects::define_cross_thread_type!(Instance);
-
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Instance {
     #[serde(skip_serializing, skip_deserializing)]
