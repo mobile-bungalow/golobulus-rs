@@ -133,7 +133,9 @@ pub struct IdleTaskBundle {
 
 pub struct TaskCreationCtx {
     pub effect: ae::aegp::EffectRefHandle,
+    pub self_layer_id: u32,
     pub comp: ae::aegp::CompHandle,
+    pub is_image_filter: bool,
     pub param_indices: Vec<(i32, String, golob_lib::Variant)>,
     pub current_frame: u32,
     pub total_frames: u32,
@@ -148,6 +150,8 @@ impl TaskCreationCtx {
         effect: ae::aegp::EffectRefHandle,
         comp: ae::aegp::CompHandle,
         total_frames: u32,
+        is_image_filter: bool,
+        self_layer_id: u32,
     ) -> Self {
         let param_indices = runner
             .iter_inputs()
@@ -164,6 +168,8 @@ impl TaskCreationCtx {
         let value = in_data.current_time();
         let scale = in_data.time_scale();
         TaskCreationCtx {
+            self_layer_id,
+            is_image_filter,
             effect,
             comp,
             param_indices,
@@ -182,7 +188,9 @@ impl TaskCreationCtx {
 
         let stream_suite = ae::aegp::suites::Stream::new()?;
         let layer_suite = ae::aegp::suites::Layer::new()?;
+
         let plugin_id = *crate::PLUGIN_ID.get().unwrap();
+        let mut first_layer = true;
 
         for (param_index, name, variant) in self.param_indices.iter() {
             let stream =
@@ -199,7 +207,20 @@ impl TaskCreationCtx {
             if let (golob_lib::Variant::Image(_), ae::aegp::StreamValue::LayerId(id)) =
                 (variant, stream_val)
             {
-                let layer_handle = layer_suite.layer_from_layer_id(&self.comp, id as u32)?;
+                // Is None,
+                if id == 0 && !(first_layer && self.is_image_filter) {
+                    first_layer = false;
+                    continue;
+                }
+
+                let layer_handle = if first_layer && self.is_image_filter {
+                    layer_suite.layer_from_layer_id(&self.comp, self.self_layer_id as u32)?
+                } else {
+                    layer_suite.layer_from_layer_id(&self.comp, id as u32)?
+                };
+
+                first_layer = false;
+
                 let shared_buffer =
                     if let Some(i) = shared_buffers.iter().position(|buf| buf.name == *name) {
                         &mut shared_buffers[i]
@@ -209,6 +230,8 @@ impl TaskCreationCtx {
                     };
 
                 footage_utils::get_layer_pixels(shared_buffer, &layer_handle, self.current_time)?;
+
+                log::debug!("pixel get");
             } else {
                 let mut variant = variant.clone();
                 let _ = crate::param_util::set_variant_from_stream_val(&mut variant, stream_val);

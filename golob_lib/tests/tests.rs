@@ -1,4 +1,3 @@
-use golob_lib::variant::*;
 use golob_lib::*;
 use image::ImageBuffer;
 use image::Rgba;
@@ -25,7 +24,7 @@ def setup(ctx):
 
 def run(ctx):
     input = ctx.get_input('input')
-    output = ctx.get_output()
+    output = ctx.output()
     np.copyto(output, input)
 
 ";
@@ -73,7 +72,7 @@ def setup(ctx):
 
 async def run(ctx):
     input = ctx.get_input('input')
-    output = ctx.get_output()
+    output = ctx.output()
     np.copyto(output, input)
 
 ";
@@ -415,11 +414,11 @@ fn registry() {
 const SIZE_CONFIG: &str = r"
 
 def setup(ctx):
-    ctx.configure_output_size(20, 20)
+    ctx.set_output_size(20, 20)
     pass
 
 def run(ctx):
-    assert ctx.get_output().shape == (20, 20, 4)
+    assert ctx.output().shape == (20, 20, 4)
     pass
 
 ";
@@ -472,7 +471,7 @@ def setup(ctx):
 
 def run(ctx):
     input = ctx.get_input('input')
-    output = ctx.get_output()
+    output = ctx.output()
 
     r, g, b, a = input[..., 0], input[..., 1], input[..., 2], input[..., 3]
     grayscale = 0.2989 * r + 0.5870 * g + 0.1140 * b

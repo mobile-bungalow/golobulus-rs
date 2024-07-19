@@ -23,6 +23,9 @@ pub enum AppMessage {
     LoadScript {
         path: PathBuf,
     },
+    LoadVenv {
+        path: PathBuf,
+    },
     ResizeOutput {
         width: u32,
         height: u32,
@@ -80,7 +83,19 @@ impl PlayGround {
 
         let runner = background_thread::spawn_render_thread(texture.clone());
 
-        if let Some(path) = path {
+        if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+            let mut site_packages = PathBuf::from(venv);
+            site_packages.push("lib");
+            // FIXME: use the python version linked from the build env
+            site_packages.push("python3.12");
+            site_packages.push("site-packages");
+
+            let _ = runner.sender.send(AppMessage::LoadVenv {
+                path: site_packages,
+            });
+        }
+
+        if let Some(path) = path.clone() {
             let _ = runner.sender.send(AppMessage::LoadScript { path });
         }
 
@@ -91,7 +106,9 @@ impl PlayGround {
                 last_render: std::time::Instant::now(),
                 last_render_dim: [255, 255],
                 loaded_images: Arc::default(),
-                current_file: Arc::default(),
+                current_file: Arc::new(RwLock::new(
+                    path.and_then(|p| p.to_str().map(|s| s.to_owned())),
+                )),
                 input_panel_hidden: false,
                 draw_continuously: false,
                 show_logs: false,

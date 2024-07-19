@@ -358,7 +358,14 @@ impl Instance {
                 )?;
 
                 let this_layer = pf_interface.effect_layer(plugin.in_data.effect_ref())?;
+                let self_layer_id = layer_suite.layer_id(this_layer)?;
                 let parent_comp = layer_suite.layer_parent_comp(this_layer)?;
+
+                let is_image_filter = plugin
+                    .params
+                    .get(ParamIdx::IsImageFilter)?
+                    .as_checkbox()?
+                    .value();
 
                 directory = create_suffixed_directory(&directory);
                 // Handling paraminteractions will only ever happen on the main thread.
@@ -375,6 +382,8 @@ impl Instance {
                                 current_effect,
                                 parent_comp,
                                 frame_count,
+                                is_image_filter,
+                                self_layer_id,
                             ),
                         };
 

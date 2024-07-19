@@ -3,7 +3,7 @@ use pyo3::types::IntoPyDict;
 pub mod context;
 mod errors;
 pub mod event_loop;
-pub mod variant;
+mod variant;
 
 use indexmap::IndexMap;
 use numpy::{npyffi, PY_ARRAY_API};
@@ -19,7 +19,7 @@ use pyo3::{
     types::{PyFunction, PyModule},
 };
 
-pub use variant::Variant;
+pub use variant::{Cfg, DiscreteCfg, Image, Variant};
 
 /// A list of supported image formats, using varying inputs and outputs
 /// may require additional copies and casting.
@@ -152,12 +152,12 @@ def run(ctx):
     input = ctx.get_input('input')
 
     if input is None:
-        output = ctx.get_output()
+        output = ctx.output()
         output.fill(0)
         return
 
-    ctx.configure_output_size(input.shape[0], input.shape[1])
-    output = ctx.get_output()
+    ctx.set_output_size(input.shape[0], input.shape[1])
+    output = ctx.output()
     output[:] = input
     pass
 ";
@@ -285,6 +285,7 @@ impl PythonRunner {
     /// This sets the venve path for *the next time*
     /// the runner loads a new script
     pub fn set_venv_path(&mut self, path: PathBuf) {
+        let _ = self.add_path_to_sys(&path);
         self.pyenv_path = Some(path);
     }
 

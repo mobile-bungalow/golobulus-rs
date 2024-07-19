@@ -2,7 +2,7 @@ use std::sync::mpsc::Sender;
 
 use crate::{launch_image_dialog, AppMessage};
 
-fn point_selector(ui: &mut egui::Ui, name: &str, input: &mut golob_lib::variant::Cfg<[f32; 2]>) {
+fn point_selector(ui: &mut egui::Ui, name: &str, input: &mut golob_lib::Cfg<[f32; 2]>) {
     ui.horizontal(|ui| {
         ui.label(name);
         ui.label("X");
@@ -55,10 +55,10 @@ pub fn input_widget(
     let before = val.clone();
     match val {
         golob_lib::Variant::Image(d) => match d.current {
-            golob_lib::variant::Image::Input => {
+            golob_lib::Image::Input => {
                 file_selector(ui, ctx, name, state, message_queue);
             }
-            golob_lib::variant::Image::Output => {}
+            golob_lib::Image::Output => {}
         },
         golob_lib::Variant::Bool(b) => {
             if ui.radio(b.current, name).clicked() {

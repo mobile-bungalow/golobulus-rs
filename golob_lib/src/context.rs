@@ -71,16 +71,7 @@ impl PyContext {
         (self.target_height, self.target_width)
     }
 
-    pub fn swizzle_output_to_argb<'a>(&'a self, py: Python<'a>) -> Result<(), PyErr> {
-        // FIXME: this is a temporary holdover, numpy is actually slower when doing this
-        // swizzle than std::simd swizzle, but I want to stay off nightly for now.
-        self.helper_module
-            .call_method1(py, "swizzle_in_place", (&self.target,))?;
-
-        Ok(())
-    }
-
-    pub fn get_output(&self, py: Python) -> Result<PyObject, PyErr> {
+    pub fn output(&self, py: Python) -> Result<PyObject, PyErr> {
         if let Some(OutputSize { width, height }) = self.output_size_override {
             self.helper_module
                 .call_method1(py, "center_crop", (&self.target, height, width))
@@ -107,7 +98,7 @@ impl PyContext {
         format!("version: {}, {}", env!("CARGO_PKG_VERSION"), profile)
     }
 
-    pub fn configure_output_size(&mut self, height: u32, width: u32) -> Result<(), PyErr> {
+    pub fn set_output_size(&mut self, height: u32, width: u32) -> Result<(), PyErr> {
         // The runner needs to be aware of this *regardless* of runner status
 
         if height == 0 || width == 0 {
@@ -271,6 +262,15 @@ impl PyContext {
         } else {
             array.call_method0(py, "view")
         }
+    }
+
+    pub fn swizzle_output_to_argb<'a>(&'a self, py: Python<'a>) -> Result<(), PyErr> {
+        // FIXME: this is a temporary holdover, numpy is actually slower when doing this
+        // swizzle than std::simd swizzle, but I want to stay off nightly for now.
+        self.helper_module
+            .call_method1(py, "swizzle_in_place", (&self.target,))?;
+
+        Ok(())
     }
 
     pub fn output_size_requested(&self) -> Option<OutputSize> {

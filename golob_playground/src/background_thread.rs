@@ -102,10 +102,14 @@ fn render(
             },
         );
 
-        *status.write() = RunnerStatus::Normal {
-            height: *height,
-            width: *width,
-        };
+        if out.is_err() {
+            *status.write() = RunnerStatus::RunFailed;
+        } else {
+            *status.write() = RunnerStatus::Normal {
+                height: *height,
+                width: *width,
+            };
+        }
     }
 }
 
@@ -144,6 +148,10 @@ pub fn spawn_render_thread(mut target: egui::TextureHandle) -> RunnerState {
 
         while let Ok(msg) = receiver.recv() {
             match msg {
+                crate::AppMessage::LoadVenv { path } => {
+                    log::info!("loading venv {path:?}");
+                    runner_th.write().set_venv_path(path);
+                }
                 crate::AppMessage::ChangeFilterMode { mode } => {
                     filter_mode = mode;
 
