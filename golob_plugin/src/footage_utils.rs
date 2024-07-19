@@ -40,28 +40,21 @@ pub fn get_layer_pixels(
     let render_options_suite = ae::aegp::suites::LayerRenderOptions::new()?;
     let world_suite = ae::aegp::suites::World::new()?;
 
-    log::debug!("{}", line!());
     let layer_render_options =
         render_options_suite.new_from_layer(layer_handle, *PLUGIN_ID.get().unwrap())?;
 
-    log::debug!("{}", line!());
     let opts = ae::aegp::LayerRenderOptions::from_handle(layer_render_options, false);
     opts.set_time(time)?;
 
-    log::debug!("{}", line!());
     let receipt = render_suite.render_and_checkout_layer_frame::<fn() -> bool>(opts, None)?;
     let world_handle = render_suite.receipt_world(receipt)?;
 
-    log::debug!("{}", line!());
     let world = ae::aegp::World::from_handle(world_handle, false);
     let mut real_layer: after_effects_sys::PF_LayerDef = unsafe { std::mem::zeroed() };
 
-    log::debug!("{}", line!());
     world_suite.fill_out_pf_effect_world(world, &mut real_layer)?;
-    log::debug!("{}", line!());
 
     let layer = ae::Layer::from_aegp_world(std::ptr::null(), world_handle)?;
-    log::debug!("{}", line!());
 
     let format = match layer.bit_depth() {
         8 => golob_lib::ImageFormat::Argb8,
