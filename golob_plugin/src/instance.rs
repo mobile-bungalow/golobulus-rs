@@ -5,6 +5,7 @@ use crate::footage_utils;
 use crate::footage_utils::create_suffixed_directory;
 use crate::idle_task;
 use crate::param_util;
+use crate::GlobalPlugin;
 use crate::ParamIdx;
 use crate::PluginState;
 use crate::INPUT_LAYER_CHECKOUT_ID;
@@ -13,8 +14,14 @@ use after_effects::*;
 use after_effects_sys as ae_sys;
 use golob_lib::{ImageFormat, InDesc, OutDesc, PythonRunner};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
+
+pub type InstanceId = usize;
+
+pub struct DebugContents {
+    pub error: Option<String>,
+    pub stdout: Option<String>,
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Instance {
@@ -23,12 +30,9 @@ pub struct Instance {
     pub src: Option<String>,
     pub last_known_path: Option<PathBuf>,
     pub venv_path: Option<PathBuf>,
+    pub id: InstanceId,
     #[serde(skip_serializing, skip_deserializing)]
     pub job_id: Option<JobId>,
-    #[serde(skip_serializing, skip_deserializing)]
-    pub timestamped_error_log: HashMap<i32, String>,
-    #[serde(skip_serializing, skip_deserializing)]
-    pub timestamped_log: HashMap<i32, String>,
 }
 
 impl Instance {
@@ -72,8 +76,6 @@ impl Instance {
                 Error::None
             })?;
 
-        self.timestamped_error_log.clear();
-        self.timestamped_log.clear();
         self.src = Some(source);
 
         if is_saved {
@@ -106,7 +108,11 @@ impl Instance {
         Ok(())
     }
 
-    pub fn try_reload(&mut self, out_data: &mut OutData) -> Result<(), Error> {
+    pub fn try_reload(
+        &mut self,
+        global: &GlobalPlugin,
+        out_data: &mut OutData,
+    ) -> Result<(), Error> {
         if let Some(ref file_path) = self.last_known_path {
             let source = std::fs::read_to_string(file_path).ok().unwrap_or_default();
 
@@ -115,6 +121,7 @@ impl Instance {
             }
 
             let file_path = file_path.file_name().unwrap().to_str().unwrap();
+
             self.runner
                 .load_script(&source, Some(file_path.to_owned()))
                 .map_err(|e| {
@@ -122,8 +129,7 @@ impl Instance {
                     Error::Generic
                 })?;
 
-            self.timestamped_error_log.clear();
-            self.timestamped_log.clear();
+            global.errors.get_mut(&self.id).map(|mut c| c.clear());
             self.src = Some(source);
             Ok(())
         } else {
@@ -134,6 +140,7 @@ impl Instance {
     pub fn smart_render(
         &mut self,
         in_data: &InData,
+        global: &GlobalPlugin,
         cb: &SmartRenderCallbacks,
     ) -> Result<(), Error> {
         if self.runner.is_sequential() {
@@ -193,7 +200,7 @@ impl Instance {
             out_layer.fill(None, None)?;
         }
 
-        crate::error::handle_run_output(self, in_data.current_time(), e);
+        crate::error::handle_run_output(self, global, in_data.current_time(), e);
 
         Ok(())
     }
@@ -270,6 +277,12 @@ impl Instance {
                 param_util::update_param_defaults_and_labels(plugin, self)?;
                 param_util::update_input_visibilities(plugin, self)?;
 
+                plugin
+                    .global
+                    .errors
+                    .get_mut(&self.id)
+                    .map(|mut c| c.clear());
+
                 plugin.out_data.set_force_rerender();
             }
             ParamIdx::UnloadButton => {
@@ -291,7 +304,7 @@ impl Instance {
                 self.launch_venv_dialog()?;
 
                 if self.src.is_some() {
-                    self.try_reload(&mut plugin.out_data)?;
+                    self.try_reload(&plugin.global, &mut plugin.out_data)?;
                 }
 
                 param_util::update_param_defaults_and_labels(plugin, self)?;
@@ -303,14 +316,14 @@ impl Instance {
                 self.venv_path = None;
 
                 if self.src.is_some() {
-                    self.try_reload(&mut plugin.out_data)?;
+                    self.try_reload(&plugin.global, &mut plugin.out_data)?;
                 }
 
                 param_util::update_input_visibilities(plugin, self)?;
                 plugin.out_data.set_force_rerender();
             }
             ParamIdx::ReloadButton => {
-                self.try_reload(&mut plugin.out_data)?;
+                self.try_reload(&plugin.global, &mut plugin.out_data)?;
                 param_util::update_input_visibilities(plugin, self)?;
                 plugin.out_data.set_force_rerender();
             }

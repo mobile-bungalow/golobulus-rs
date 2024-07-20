@@ -6,7 +6,7 @@ CrateName        := "golob_plugin"
 PyMajor          := "3.12"
 PyMinor          := ".3"
 PyVer            := PyMajor + PyMinor
-NumpyVersion     := "2.0"
+NumpyVersion     := "1.26.4"
 BundlePyPath     := "Contents/Resources/Python"
 
 macos_triple := arch() + "-apple-darwin"

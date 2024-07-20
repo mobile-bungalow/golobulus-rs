@@ -83,18 +83,6 @@ impl PlayGround {
 
         let runner = background_thread::spawn_render_thread(texture.clone());
 
-        if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
-            let mut site_packages = PathBuf::from(venv);
-            site_packages.push("lib");
-            // FIXME: use the python version linked from the build env
-            site_packages.push("python3.12");
-            site_packages.push("site-packages");
-
-            let _ = runner.sender.send(AppMessage::LoadVenv {
-                path: site_packages,
-            });
-        }
-
         if let Some(path) = path.clone() {
             let _ = runner.sender.send(AppMessage::LoadScript { path });
         }

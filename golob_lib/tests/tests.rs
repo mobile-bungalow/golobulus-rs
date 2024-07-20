@@ -15,7 +15,8 @@ macro_rules! png_pixels {
 }
 
 // really stupid test
-const IDENT: &str = r"
+const IDENT: &str = r#"
+import sys
 import numpy as np
 
 def setup(ctx):
@@ -27,10 +28,10 @@ def run(ctx):
     output = ctx.output()
     np.copyto(output, input)
 
-";
+"#;
 
 #[test]
-fn ident() {
+fn q_ident() {
     let mut runner = PythonRunner::default();
 
     runner.load_script(IDENT, None).unwrap();
@@ -304,7 +305,9 @@ fn stdout() {
     );
 }
 
-const SEQ: &str = r"
+const SEQ: &str = r#"
+import sys
+import numpy
 
 def setup(ctx):
     ctx.set_sequential_mode(True)
@@ -313,7 +316,7 @@ def setup(ctx):
 def run(ctx):
     pass
 
-";
+"#;
 
 #[test]
 fn seq_mode() {

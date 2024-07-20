@@ -11,7 +11,7 @@ use after_effects as ae;
 use after_effects_sys as ae_sys;
 use background_task::{BackgroundTask, JobId};
 use idle_task::IdleTaskBundle;
-use instance::Instance;
+use instance::{DebugContents, Instance, InstanceId};
 use std::cell::Cell;
 use std::sync::Arc;
 
@@ -43,6 +43,7 @@ pub enum ParamIdx {
 #[derive(Default)]
 struct GlobalPlugin {
     pub task_map: Arc<dashmap::DashMap<JobId, BackgroundTask>>,
+    pub errors: Arc<dashmap::DashMap<InstanceId, HashMap<i32, DebugContents>>>,
     pub current_id: usize,
 }
 
@@ -139,7 +140,13 @@ impl AdobePluginInstance for Instance {
                 .out_data
                 .set_return_msg("Golobulus: The adder plods where it ought not."),
             Command::Event { mut extra } => {
-                ui::draw(&plugin.in_data, self, plugin.params, &mut extra)?;
+                ui::draw(
+                    &plugin.in_data,
+                    self,
+                    plugin.global,
+                    plugin.params,
+                    &mut extra,
+                )?;
             }
             Command::UpdateParamsUi => {
                 param_util::update_param_defaults_and_labels(plugin, self)?;
@@ -154,9 +161,10 @@ impl AdobePluginInstance for Instance {
             }
             Command::SmartRender { extra } => {
                 let cb = extra.callbacks();
-                self.smart_render(&plugin.in_data, &cb)?;
+                self.smart_render(&plugin.in_data, plugin.global, &cb)?;
             }
             Command::SequenceSetup => {
+                self.id = fastrand::usize(..);
                 if let Some(src) = self.src.clone() {
                     self.runner.load_script(src, None).map_err(|e| {
                         error::startup_error_message(e, &mut plugin.out_data);

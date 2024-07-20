@@ -1,7 +1,9 @@
-import numpy as np
-
-
 def setup(ctx):
+    import sys
+
+    print(sys.path)
+    print(np)
+    print(np.__version__)
     ctx.register_image_input("input")
 
 

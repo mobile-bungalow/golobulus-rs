@@ -193,9 +193,27 @@ impl<'a> RenderPass<'a> {
 impl PythonRunner {
     fn new(src: String, file_name: Option<String>) -> Result<Self, GolobulError> {
         pyo3::prepare_freethreaded_python();
+
         let event_loop = event_loop::get_event_loop();
 
         let helper_module: Py<PyModule> = Python::with_gil(|py| {
+            #[cfg(target_os = "macos")]
+            if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+                let version_info = py.version_info();
+                let sys = py.import_bound("sys").unwrap();
+                let sys_path = sys.getattr("path").unwrap();
+
+                sys_path
+                    .call_method1(
+                        "append",
+                        (format!(
+                            "{}/lib/python{}.{}/site-packages",
+                            venv, version_info.major, version_info.minor
+                        ),),
+                    )
+                    .unwrap();
+            }
+
             let asyncio = py
                 .import_bound("asyncio")
                 .expect("Failed to import asyncio");

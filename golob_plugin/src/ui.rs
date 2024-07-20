@@ -2,22 +2,23 @@ use after_effects as ae;
 use after_effects::drawbot;
 use after_effects_sys::{DRAWBOT_PointF32, DRAWBOT_RectF32};
 
+use crate::{instance::DebugContents, GlobalPlugin};
+
 pub fn draw(
     in_data: &ae::InData,
     local: &mut crate::instance::Instance,
+    global: &GlobalPlugin,
     params: &mut ae::Parameters<crate::ParamIdx>,
     event: &mut ae::EventExtra,
 ) -> Result<(), ae::Error> {
     let ev = event.event();
 
+    let Some(map) = &global.errors.get(&local.id) else {
+        return Ok(());
+    };
+
     match ev {
-        ae::Event::Draw(_) => draw_text(
-            in_data,
-            params,
-            &local.timestamped_error_log,
-            &local.timestamped_log,
-            event,
-        ),
+        ae::Event::Draw(_) => draw_text(in_data, params, &map, event),
         _ => Ok(()),
     }
 }
@@ -25,8 +26,7 @@ pub fn draw(
 fn draw_text(
     in_data: &ae::InData,
     params: &mut ae::Parameters<crate::ParamIdx>,
-    error_map: &std::collections::HashMap<i32, String>,
-    log_map: &std::collections::HashMap<i32, String>,
+    error_map: &std::collections::HashMap<i32, DebugContents>,
     event: &mut ae::EventExtra,
 ) -> Result<(), ae::Error> {
     let show_debug = params
@@ -92,7 +92,7 @@ fn draw_text(
     let step = in_data.time_step();
     let local_frame = in_data.current_frame_local();
 
-    let draw_messages = |map: &std::collections::HashMap<i32, String>,
+    let draw_messages = |map: &std::collections::HashMap<i32, DebugContents>,
                          color: &drawbot::ColorRgba,
                          offset: &mut f32,
                          label: &str|
@@ -104,7 +104,17 @@ fn draw_text(
             map.get(&t).map(|v| (i * step, v))
         });
 
-        for (time_offset, string) in offset_output {
+        for (time_offset, contents) in offset_output {
+            let string = match label {
+                "stdout" => &contents.stdout,
+                "err" => &contents.error,
+                _ => &None,
+            };
+
+            let Some(string) = string.as_ref() else {
+                return Ok(());
+            };
+
             let cur_frame = (time_offset / step) + local_frame as i32;
             let formatted_string = format!("[frame:{cur_frame} - {label}] {string}");
             // Draw string only does one line at a time
@@ -144,7 +154,7 @@ fn draw_text(
 
     let mut offset = 0.0;
     draw_messages(error_map, &error_color, &mut offset, "err")?;
-    draw_messages(log_map, &std_color, &mut offset, "stdout")?;
+    draw_messages(error_map, &std_color, &mut offset, "stdout")?;
 
     event.set_event_out_flags(ae::EventOutFlags::HANDLED_EVENT);
     Ok(())
