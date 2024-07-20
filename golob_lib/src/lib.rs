@@ -484,6 +484,11 @@ impl PythonRunner {
             py.import_bound("numpy")
                 .map_err(|_e| GolobulError::InvalidModule("You couldn't lock numpy!".to_owned()))?;
 
+            // Torch additionally wants to be loaded on the main thread, once.
+            // This might fail but it prevents segfaults based on crappy assumptions in the
+            // pytorch code base.
+            let _ = py.import_bound("torch");
+
             let out_catcher =
                 Bound::new(py, StdOutCatcher::default()).map_err(|_| GolobulError::BoundError)?;
 

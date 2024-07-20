@@ -1,8 +1,9 @@
 use egui::mutex::RwLock;
-use golob_lib::PythonRunner;
+use golob_lib::{GolobulError, PythonRunner};
 use image::imageops::FilterType::Triangle;
-use notify::*;
+use notify::{RecursiveMode, Watcher};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{mpsc::Sender, Arc};
 
 #[derive(Debug, Clone)]
@@ -10,107 +11,145 @@ pub enum RunnerStatus {
     InitFailed,
     Busy,
     RunFailed,
+    NeedsReload(PathBuf),
     Normal { width: usize, height: usize },
 }
 
-pub struct RunnerState {
-    pub runner: Arc<RwLock<PythonRunner>>,
-    pub status: Arc<RwLock<RunnerStatus>>,
-    pub sender: Sender<crate::AppMessage>,
+// This is super disorganized, do this in a
+// more principled way when you get a chance
+pub struct BgThreadState {
+    pub runner: PythonRunner,
+    pub dimensions: (usize, usize),
+    pub watcher: notify::RecommendedWatcher,
+    pub image_inputs: HashMap<String, crate::ImageDesc>,
+    pub staging_buffer: Vec<u8>,
+    pub current_path: Option<PathBuf>,
+    pub filter_mode: egui::TextureFilter,
 }
 
-fn render(
-    time: f32,
-    width: &mut usize,
-    height: &mut usize,
-    buf: &mut Vec<u8>,
-    runner: &mut PythonRunner,
-    image_inputs: &HashMap<String, crate::ImageDesc>,
-    mut target: egui::TextureHandle,
-    filter_mode: egui::TextureFilter,
-    status: Arc<RwLock<RunnerStatus>>,
-) {
-    let start = std::time::Instant::now();
-    *status.write() = RunnerStatus::Busy;
-    runner.set_time(time);
+impl BgThreadState {
+    pub fn load_script(&mut self, path: &PathBuf) -> Result<Option<String>, GolobulError> {
+        log::info!("loading script {path:?}");
 
-    buf.fill(0);
-    let o = golob_lib::OutDesc {
-        fmt: golob_lib::ImageFormat::Rgba8,
-        data: buf,
-        height: *height as u32,
-        width: *width as u32,
-        stride: None,
-    };
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!("{e:?}");
+                return Err(GolobulError::InvalidModule(format!("{e:?}")));
+            }
+        };
 
-    let mut pass = runner.create_render_pass(o);
+        if let Some(old) = self.current_path.take() {
+            self.watcher.unwatch(&old).unwrap();
+        }
 
-    for (name, image) in image_inputs.iter() {
-        let i = golob_lib::InDesc {
+        self.watcher
+            .watch(&path, RecursiveMode::NonRecursive)
+            .unwrap();
+
+        self.current_path = Some(path.clone());
+
+        if let Err(e) = self.runner.clear_script_parent_directory() {
+            log::error!("{e:?}");
+        }
+
+        if let Some(parent) = path.parent() {
+            self.runner.set_script_parent_directory(parent.to_owned());
+        }
+
+        let out = self
+            .runner
+            .load_script(contents, path.to_str().map(|s| s.to_owned()));
+
+        log_run(&out);
+
+        out
+    }
+    pub fn render(
+        &mut self,
+        time: f32,
+        mut target: egui::TextureHandle,
+        status: Arc<RwLock<RunnerStatus>>,
+    ) {
+        let start = std::time::Instant::now();
+        *status.write() = RunnerStatus::Busy;
+        self.runner.set_time(time);
+
+        self.staging_buffer.fill(0);
+
+        let o = golob_lib::OutDesc {
             fmt: golob_lib::ImageFormat::Rgba8,
-            data: &image.data,
-            width: image.width,
-            height: image.height,
+            data: &mut self.staging_buffer,
+            height: self.dimensions.0 as u32,
+            width: self.dimensions.1 as u32,
             stride: None,
         };
-        pass.load_input(i, name);
-    }
 
-    let out = pass.submit();
+        let mut pass = self.runner.create_render_pass(o);
 
-    if out.is_err() {
-        *status.write() = RunnerStatus::RunFailed;
-    }
+        for (name, image) in self.image_inputs.iter() {
+            let i = golob_lib::InDesc {
+                fmt: golob_lib::ImageFormat::Rgba8,
+                data: &image.data,
+                width: image.width,
+                height: image.height,
+                stride: None,
+            };
+            pass.load_input(i, name);
+        }
 
-    log_run(&out);
-
-    let dur = start.elapsed().as_secs_f32();
-    log::info!(
-        "render took: {dur} secs, {:?}",
-        runner.requested_output_resize()
-    );
-
-    if runner
-        .requested_output_resize()
-        .is_some_and(|size| size.width != *width as u32 || size.height != *height as u32)
-    {
-        log::debug!("Rerendering with exact buffer specified");
-        let size = runner.requested_output_resize().unwrap();
-        *buf = vec![0; (size.width * size.height * 4) as usize];
-        *width = size.width as usize;
-        *height = size.height as usize;
-        render(
-            time,
-            width,
-            height,
-            buf,
-            runner,
-            image_inputs,
-            target,
-            filter_mode,
-            status,
-        );
-    } else {
-        let data = egui::ColorImage::from_rgba_unmultiplied([*width, *height], buf);
-
-        target.set(
-            data,
-            egui::TextureOptions {
-                magnification: filter_mode,
-                minification: filter_mode,
-                wrap_mode: egui::TextureWrapMode::ClampToEdge,
-            },
-        );
+        let out = pass.submit();
 
         if out.is_err() {
             *status.write() = RunnerStatus::RunFailed;
+        }
+
+        log_run(&out);
+
+        let dur = start.elapsed().as_secs_f32();
+
+        log::info!("render took: {dur} secs",);
+
+        if self.runner.requested_output_resize().is_some_and(|size| {
+            size.width != self.dimensions.1 as u32 || size.height != self.dimensions.0 as u32
+        }) {
+            log::debug!("Rerendering with exact buffer specified");
+            let size = self.runner.requested_output_resize().unwrap();
+            self.staging_buffer = vec![0; (size.width * size.height * 4) as usize];
+            self.dimensions.1 = size.width as usize;
+            self.dimensions.0 = size.height as usize;
+            self.render(time, target, status);
         } else {
-            *status.write() = RunnerStatus::Normal {
-                height: *height,
-                width: *width,
-            };
+            let data = egui::ColorImage::from_rgba_unmultiplied(
+                [self.dimensions.1, self.dimensions.0],
+                &self.staging_buffer,
+            );
+
+            target.set(
+                data,
+                egui::TextureOptions {
+                    magnification: self.filter_mode,
+                    minification: self.filter_mode,
+                    wrap_mode: egui::TextureWrapMode::ClampToEdge,
+                },
+            );
+
+            if out.is_err() {
+                *status.write() = RunnerStatus::RunFailed;
+            } else {
+                *status.write() = RunnerStatus::Normal {
+                    height: self.dimensions.0,
+                    width: self.dimensions.1,
+                };
+            }
         }
     }
+}
+
+pub struct RunnerState {
+    pub runner: Arc<RwLock<BgThreadState>>,
+    pub status: Arc<RwLock<RunnerStatus>>,
+    pub sender: Sender<crate::AppMessage>,
 }
 
 pub fn spawn_render_thread(mut target: egui::TextureHandle) -> RunnerState {
@@ -118,15 +157,15 @@ pub fn spawn_render_thread(mut target: egui::TextureHandle) -> RunnerState {
         height: 255,
         width: 255,
     }));
+
     let status = status_th.clone();
 
-    let runner_th = Arc::new(RwLock::new(golob_lib::PythonRunner::default()));
-    let runner = runner_th.clone();
+    let runner = golob_lib::PythonRunner::default();
 
     let (sender, receiver) = std::sync::mpsc::channel();
 
     let watcher_clone = sender.clone();
-    let mut watcher = notify::RecommendedWatcher::new(
+    let watcher = notify::RecommendedWatcher::new(
         move |res: notify::Result<notify::Event>| {
             if let Ok(event) = res {
                 if event.kind.is_modify() {
@@ -138,47 +177,53 @@ pub fn spawn_render_thread(mut target: egui::TextureHandle) -> RunnerState {
     )
     .unwrap();
 
+    let (height, width) = (255, 255);
+
+    let thread_state = BgThreadState {
+        watcher,
+        runner,
+        dimensions: (height, width),
+        image_inputs: std::collections::HashMap::new(),
+        staging_buffer: vec![0u8; width * height * 4],
+        current_path: None,
+        filter_mode: egui::TextureFilter::Linear,
+    };
+
+    let thread_state = Arc::new(RwLock::new(thread_state));
+    let return_runner = thread_state.clone();
+
     std::thread::spawn(move || {
-        let (mut width, mut height) = (255, 255);
-        let mut staging_buffer = vec![0u8; width * height * 4];
-        let mut image_inputs = std::collections::HashMap::new();
-        let mut current_path: Option<std::path::PathBuf> = None;
-        let mut filter_mode = egui::TextureFilter::Linear;
         let start = std::time::Instant::now();
 
         while let Ok(msg) = receiver.recv() {
             match msg {
                 crate::AppMessage::LoadVenv { path } => {
                     log::info!("loading venv {path:?}");
-                    runner_th.write().set_venv_path(path);
+                    thread_state.write().runner.set_venv_path(path);
                 }
                 crate::AppMessage::ChangeFilterMode { mode } => {
-                    filter_mode = mode;
+                    thread_state.write().filter_mode = mode;
 
-                    let data =
-                        egui::ColorImage::from_rgba_unmultiplied([width, height], &staging_buffer);
+                    let data = egui::ColorImage::from_rgba_unmultiplied(
+                        [width, height],
+                        &thread_state.write().staging_buffer,
+                    );
 
                     target.set(
                         data,
                         egui::TextureOptions {
-                            magnification: filter_mode,
-                            minification: filter_mode,
+                            magnification: mode,
+                            minification: mode,
                             wrap_mode: egui::TextureWrapMode::ClampToEdge,
                         },
                     );
                 }
                 crate::AppMessage::UnloadImage { var } => {
-                    image_inputs.remove(&var);
+                    thread_state.write().image_inputs.remove(&var);
 
-                    render(
+                    thread_state.write().render(
                         start.elapsed().as_secs_f32(),
-                        &mut width,
-                        &mut height,
-                        &mut staging_buffer,
-                        &mut runner_th.write(),
-                        &image_inputs,
                         target.clone(),
-                        filter_mode,
                         status_th.clone(),
                     );
                 }
@@ -195,7 +240,7 @@ pub fn spawn_render_thread(mut target: egui::TextureHandle) -> RunnerState {
 
                     let image_buffer = image.into_raw();
 
-                    image_inputs.insert(
+                    thread_state.write().image_inputs.insert(
                         var,
                         crate::ImageDesc {
                             data: image_buffer,
@@ -204,83 +249,20 @@ pub fn spawn_render_thread(mut target: egui::TextureHandle) -> RunnerState {
                         },
                     );
 
-                    render(
+                    thread_state.write().render(
                         start.elapsed().as_secs_f32(),
-                        &mut width,
-                        &mut height,
-                        &mut staging_buffer,
-                        &mut runner_th.write(),
-                        &image_inputs,
                         target.clone(),
-                        filter_mode,
                         status_th.clone(),
                     );
                 }
                 crate::AppMessage::LoadScript { path } => {
                     log::info!("loading script {path:?}");
-                    let contents = match std::fs::read_to_string(&path) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            log::error!("{e:?}");
-                            continue;
-                        }
-                    };
-
-                    if let Some(old) = current_path {
-                        watcher.unwatch(&old).unwrap();
-                    }
-
-                    watcher.watch(&path, RecursiveMode::NonRecursive).unwrap();
-
-                    current_path = Some(path.clone());
-
-                    if let Err(e) = runner_th.write().clear_script_parent_directory() {
-                        log::error!("{e:?}");
-                    }
-
-                    if let Some(parent) = path.parent() {
-                        runner_th
-                            .write()
-                            .set_script_parent_directory(parent.to_owned());
-                    }
-
-                    let out = runner_th
-                        .write()
-                        .load_script(contents, path.to_str().map(|s| s.to_owned()));
-
-                    log_run(&out);
-
-                    if out.is_err() {
-                        *status_th.write() = RunnerStatus::InitFailed;
-                    } else {
-                        *status_th.write() = RunnerStatus::Normal { height, width };
-
-                        render(
-                            start.elapsed().as_secs_f32(),
-                            &mut width,
-                            &mut height,
-                            &mut staging_buffer,
-                            &mut runner_th.write(),
-                            &image_inputs,
-                            target.clone(),
-                            filter_mode,
-                            status_th.clone(),
-                        );
-                    }
-                }
-                crate::AppMessage::ResizeOutput {
-                    width: new_w,
-                    height: new_h,
-                } => {
-                    staging_buffer = vec![0; (new_w * new_h * 4) as usize];
-                    width = new_w as usize;
-                    height = new_h as usize;
-                    *status_th.write() = RunnerStatus::Normal { width, height };
+                    *status_th.write() = RunnerStatus::NeedsReload(path);
                 }
                 crate::AppMessage::ReloadScript => {
-                    if let Some(path) = current_path.as_ref() {
+                    if let Some(path) = thread_state.read().current_path.as_ref() {
                         let contents = std::fs::read_to_string(path).unwrap();
-                        let out = runner_th.write().load_script(contents, None);
+                        let out = thread_state.write().runner.load_script(contents, None);
 
                         log_run(&out);
 
@@ -288,31 +270,18 @@ pub fn spawn_render_thread(mut target: egui::TextureHandle) -> RunnerState {
                             *status_th.write() = RunnerStatus::InitFailed;
                         } else {
                             *status_th.write() = RunnerStatus::Normal { width, height };
-
-                            render(
+                            thread_state.write().render(
                                 start.elapsed().as_secs_f32(),
-                                &mut width,
-                                &mut height,
-                                &mut staging_buffer,
-                                &mut runner_th.write(),
-                                &image_inputs,
                                 target.clone(),
-                                filter_mode,
                                 status_th.clone(),
                             );
                         }
                     }
                 }
                 crate::AppMessage::Render => {
-                    render(
+                    thread_state.write().render(
                         start.elapsed().as_secs_f32(),
-                        &mut width,
-                        &mut height,
-                        &mut staging_buffer,
-                        &mut runner_th.write(),
-                        &image_inputs,
                         target.clone(),
-                        filter_mode,
                         status_th.clone(),
                     );
                 }
@@ -322,10 +291,8 @@ pub fn spawn_render_thread(mut target: egui::TextureHandle) -> RunnerState {
                         _ => "/".into(),
                     };
 
-                    let home_dir = current_path
-                        .as_ref()
-                        .and_then(|p| p.parent())
-                        .unwrap_or(&home_dir);
+                    let cur = thread_state.read().current_path.clone();
+                    let home_dir = cur.as_ref().and_then(|p| p.parent()).unwrap_or(&home_dir);
 
                     let Some(file) = rfd::FileDialog::new()
                         .set_directory(home_dir)
@@ -340,7 +307,7 @@ pub fn spawn_render_thread(mut target: egui::TextureHandle) -> RunnerState {
                     let mut image = image::RgbaImage::from_raw(
                         width as u32,
                         height as u32,
-                        staging_buffer.clone(),
+                        thread_state.read().staging_buffer.clone(),
                     )
                     .unwrap();
 
@@ -366,7 +333,7 @@ pub fn spawn_render_thread(mut target: egui::TextureHandle) -> RunnerState {
     RunnerState {
         status,
         sender,
-        runner,
+        runner: return_runner,
     }
 }
 

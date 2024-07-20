@@ -2,6 +2,7 @@ mod background_thread;
 mod inputs_panel;
 mod util;
 
+use background_thread::RunnerStatus;
 use eframe::*;
 use egui::TextureHandle;
 use std::sync::{Arc, RwLock};
@@ -26,10 +27,6 @@ pub enum AppMessage {
     LoadVenv {
         path: PathBuf,
     },
-    ResizeOutput {
-        width: u32,
-        height: u32,
-    },
     ScreenShot {
         params: Option<(u32, u32, egui::TextureFilter)>,
     },
@@ -53,6 +50,9 @@ pub struct AppState {
     pub draw_continuously: bool,
     pub eager_updates: bool,
     pub show_logs: bool,
+    // all loading must be done on the main thread,
+    // some python packages assume thats where they are loaded
+    pub needs_reload: Option<PathBuf>,
     pub filter_type: egui::TextureFilter,
 }
 
@@ -83,8 +83,8 @@ impl PlayGround {
 
         let runner = background_thread::spawn_render_thread(texture.clone());
 
-        if let Some(path) = path.clone() {
-            let _ = runner.sender.send(AppMessage::LoadScript { path });
+        if let Some(path) = path.as_ref() {
+            let _ = runner.runner.write().load_script(path);
         }
 
         Self {
@@ -94,6 +94,7 @@ impl PlayGround {
                 last_render: std::time::Instant::now(),
                 last_render_dim: [255, 255],
                 loaded_images: Arc::default(),
+                needs_reload: path.clone(),
                 current_file: Arc::new(RwLock::new(
                     path.and_then(|p| p.to_str().map(|s| s.to_owned())),
                 )),
@@ -146,6 +147,15 @@ impl eframe::App for PlayGround {
                     self.state.last_render_dim = [width, height];
                     self.state.last_render = std::time::Instant::now();
                     egui::Image::new(&self.state.texture).paint_at(ui, lb);
+                }
+                background_thread::RunnerStatus::NeedsReload(path) => {
+                    let out = self.runner.runner.write().load_script(&path);
+
+                    if out.is_err() {
+                        *self.runner.status.write() = RunnerStatus::InitFailed;
+                    } else {
+                        let _ = self.runner.sender.send(AppMessage::Render);
+                    }
                 }
             };
         });
@@ -243,7 +253,7 @@ impl eframe::App for PlayGround {
                     let mut changed = false;
                     let sender = &self.runner.sender;
                     let mut runner = self.runner.runner.write();
-                    for (name, ref mut val) in runner.iter_inputs_mut() {
+                    for (name, ref mut val) in runner.runner.iter_inputs_mut() {
                         changed |=
                             inputs_panel::input_widget(ctx, ui, &mut self.state, sender, name, val);
                     }
