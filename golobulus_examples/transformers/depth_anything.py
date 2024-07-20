@@ -33,6 +33,6 @@ def run(ctx):
 
     im = Image.fromarray(input)
     depth = pipe(im)["depth"]
-    # arr = numpy.asarray(depth)
-    # output[..., :3] = arr[..., numpy.newaxis]
-    # output[..., 3] = 255
+    arr = np.asarray(depth)
+    output[..., :3] = arr[..., np.newaxis]
+    output[..., 3] = 255
