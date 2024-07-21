@@ -79,7 +79,12 @@ pub fn input_widget(
                     }
                 });
         }
-        golob_lib::Variant::Color(_) => {}
+        golob_lib::Variant::Color(cfg) => {
+            let _ = ui.horizontal(|ui| {
+                ui.color_edit_button_rgba_unmultiplied(&mut cfg.current);
+                ui.label(name);
+            });
+        }
         golob_lib::Variant::Int(v) => {
             ui.add(egui::Slider::new(&mut v.current, v.min..=v.max).text(name));
             ui.add_space(10.0);

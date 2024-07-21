@@ -260,7 +260,8 @@ pub fn spawn_render_thread(mut target: egui::TextureHandle) -> RunnerState {
                     *status_th.write() = RunnerStatus::NeedsReload(path);
                 }
                 crate::AppMessage::ReloadScript => {
-                    if let Some(path) = thread_state.read().current_path.as_ref() {
+                    let path = thread_state.read().current_path.clone();
+                    if let Some(path) = path {
                         let contents = std::fs::read_to_string(path).unwrap();
                         let out = thread_state.write().runner.load_script(contents, None);
 
